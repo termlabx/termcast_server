@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://apps.apple.com/app/termcast"><img src="https://img.shields.io/badge/App_Store-Download-blue?logo=apple&logoColor=white" alt="App Store"></a>
-  <a href="https://github.com/ulixcode-labs/termcast_server/raw/main/bin/termcast_server.dmg"><img src="https://img.shields.io/badge/macOS-Desktop_App-333?logo=apple&logoColor=white" alt="macOS Desktop"></a>
+  <a href="https://github.com/termlabx/termcast_server/raw/main/bin/termcast_server.dmg"><img src="https://img.shields.io/badge/macOS-Desktop_App-333?logo=homebrew&logoColor=white" alt="macOS Desktop"></a>
 </p>
 
 <p align="center">
@@ -59,7 +59,16 @@ For Mac users who prefer a GUI, the **Termcast Desktop** app lives in your menu 
 - Launch at login
 - Prevent sleep while serving
 
-[Download for macOS](https://github.com/ulixcode-labs/termcast_server/blob/main/bin/Termcast-0.1.0-arm64.dmg)
+**Install via Homebrew (recommended):**
+
+```bash
+brew tap termlabx/termcast
+brew install termcast
+```
+
+Upgrade anytime with `brew upgrade termcast`.
+
+Or [download the .dmg directly](https://github.com/termlabx/termcast_server/raw/main/bin/termcast_server.dmg).
 
 ---
 
@@ -140,7 +149,7 @@ Every binary release is automatically scanned by **6 independent security checks
 
 - [Website](https://termcast.pages.dev)
 - [iOS App](https://apps.apple.com/app/termcast)
-- [Desktop App](https://github.com/ulixcode-labs/termcast_server/raw/main/bin/termcast_server.dmg)
+- [Desktop App](https://github.com/termlabx/termcast_server/raw/main/bin/termcast_server.dmg) — or `brew tap termlabx/termcast && brew install termcast`
 
 ## License
 
