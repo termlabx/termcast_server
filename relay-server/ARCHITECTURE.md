@@ -189,6 +189,13 @@ iOS App                     Cloudflare Relay              Desktop Server
 ## Security Boundaries
 
 1. **QR Pairing**: Out-of-band key exchange (camera scan) — prevents MITM
-2. **Pairing Secret**: PBKDF2-hashed on relay — relay never sees plaintext
+2. **Pairing Secret**: sent to the relay over TLS at `/api/register` and stored
+   only as a PBKDF2 hash. The relay does see the plaintext in transit — it is a
+   bearer credential for joining the room, *not* a key to terminal content, and
+   compromising it cannot decrypt any traffic (see #3).
 3. **E2E Encryption**: Relay only forwards opaque ciphertext
 4. **Localhost ttyd**: Bound to 127.0.0.1 — no network exposure
+5. **Connection metadata**: the relay terminates the client's TCP connection, so
+   it necessarily sees each client's IP, coarse geo-IP location and user agent,
+   and reports them to the daemon (rendered by `termcast status` and the tray).
+   E2E encryption covers terminal *content*, not this metadata.

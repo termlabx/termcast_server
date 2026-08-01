@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 import { homedir, hostname, platform, userInfo } from 'node:os';
 import { ensureAugmentedIndex } from './ttyd-index.js';
+import { resolveBaseUrl, releaseUrl } from './upgrade.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -297,7 +298,7 @@ export class TtydManager extends EventEmitter {
       } catch {}
 
       // 4. Download lazily — failure here must not crash the server
-      const url = `https://relay.example.com/releases/${binaryName}`;
+      const url = releaseUrl(resolveBaseUrl(), binaryName);
       console.log(`tmux not found — downloading for ${process.platform}-${process.arch}...`);
       mkdirSync(downloadDir, { recursive: true });
       const resp = await fetch(url);

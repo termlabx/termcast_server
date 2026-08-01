@@ -4,12 +4,12 @@ set -euo pipefail
 # ── Termcast installer ─────────────────────────────────────────────
 # Supports: macOS (arm64, x64), Linux (x64, arm64), WSL
 #
-#   curl -fsSL https://relay.example.com/install.sh | bash
+#   curl -fsSL https://termcast.download.ulixlab.com/install.sh | bash
 #
 # ──────────────────────────────────────────────────────────────────
 
 INSTALL_DIR="$HOME/.termcast"
-BASE_URL="https://relay.example.com"
+BASE_URL="${TERMCAST_RELEASES_URL:-https://termcast.download.ulixlab.com}"
 NODE_VERSION="24.13.1"
 
 # ── Colors ────────────────────────────────────────────────────────

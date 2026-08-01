@@ -29,6 +29,12 @@ interface Settings {
   openAtLogin: boolean;
   preventSleep: boolean;
   serverWasRunning: boolean;
+  /**
+   * Relay to connect to, e.g. "wss://relay.example.com". There is no default —
+   * the daemon refuses to start without one. Launched from Finder we inherit no
+   * shell env, so this setting (not TERMCAST_RELAY_URL) is the primary channel.
+   */
+  relayUrl: string;
 }
 
 const settingsPath = join(app.getPath('userData'), 'settings.json');
@@ -73,7 +79,7 @@ function loadSettings(): Settings {
   try {
     return { openAtLogin: false, preventSleep: false, serverWasRunning: true, ...JSON.parse(readFileSync(settingsPath, 'utf-8')) };
   } catch {
-    return { openAtLogin: false, preventSleep: false, serverWasRunning: true };
+    return { openAtLogin: false, preventSleep: false, serverWasRunning: true, relayUrl: '' };
   }
 }
 
@@ -501,6 +507,12 @@ function updateTray(): void {
 
   menuItems.push({ type: 'separator' });
   menuItems.push({
+    label: '⚙︎  Relay settings…',
+    // Materialise the file first: on a fresh install nothing has written it yet
+    // and openPath on a missing path silently does nothing.
+    click: () => { saveSettings(loadSettings()); shell.openPath(settingsPath); },
+  });
+  menuItems.push({
     label: '💬  Support on Discord',
     click: () => shell.openExternal('https://discord.gg/MZkhBDJKf'),
   });
@@ -539,7 +551,29 @@ function startServer(saveState = true): void {
 
   // Use Electron's bundled Node.js so we don't depend on system node
   // (nvm/volta/fnm paths aren't in PATH when launched from Finder)
-  const env: Record<string, string | undefined> = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  // Termcast ships no default relay. Prefer the saved setting over any inherited
+  // env, since launching from Finder gives us no shell environment at all.
+  const relayUrl = (loadSettings().relayUrl || process.env.TERMCAST_RELAY_URL || '').trim();
+  if (!relayUrl) {
+    log('No relay configured — not spawning server');
+    serverStarting = false;
+    serverRunning = false;
+    updateTray();
+    showError(
+      'No relay configured',
+      'Termcast does not ship a default relay.\n\n'
+      + `Add your relay to:\n${settingsPath}\n\n`
+      + 'e.g.  "relayUrl": "wss://relay.example.com"\n\n'
+      + 'Then start the server again.',
+    );
+    return;
+  }
+
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: '1',
+    TERMCAST_RELAY_URL: relayUrl,
+  };
   if (app.isPackaged) {
     const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/opt/local/bin'];
     env.PATH = [...extraPaths, env.PATH].join(':');

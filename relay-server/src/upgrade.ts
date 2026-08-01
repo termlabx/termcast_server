@@ -9,7 +9,10 @@
 // copies are always present.
 import { sep } from 'node:path';
 
-const DEFAULT_BASE_URL = 'https://relay.example.com';
+// Public download host for release assets. Override with TERMCAST_RELEASES_URL
+// to self-host. Distinct from the relay, which has no default at all — see
+// relay-url.ts.
+const DEFAULT_BASE_URL = 'https://termcast.download.ulixlab.com';
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux']);
 const SUPPORTED_ARCHS = new Set(['x64', 'arm64']);
 

@@ -12,8 +12,9 @@
 import { rename, chmod, unlink, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-// Cloudflare Worker that fronts the GitHub release assets and KV blobs.
-export const DEFAULT_BASE_URL = 'https://relay.example.com';
+// Public download host fronting the release assets. Override with
+// TERMCAST_RELEASES_URL to self-host.
+export const DEFAULT_BASE_URL = 'https://termcast.download.ulixlab.com';
 
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux']);
 const SUPPORTED_ARCHS = new Set(['x64', 'arm64']);

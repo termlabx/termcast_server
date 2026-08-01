@@ -22,6 +22,7 @@ import { shouldRecoverFromTtydExit } from './ttyd-restart-policy.js';
 import { RelayClient } from './relay-client.js';
 import { Bridge } from './bridge.js';
 import { generatePairingInfo, displayQRCode } from './pairing.js';
+import { resolveRelayUrl, relayHttpUrl } from './relay-url.js';
 import { wrapSecret } from './pairing-wrap.js';
 import { WebUI } from './web-ui.js';
 import { MeshClient, type MeshPeer } from './mesh-client.js';
@@ -162,12 +163,21 @@ function ejectInConfig(): boolean {
 program
   .command('start')
   .description('Start the Termcast server and connect to relay')
-  .option('-r, --relay <url>', 'Relay URL', 'wss://relay.example.com')
+  .option('-r, --relay <url>', 'Relay URL (or set TERMCAST_RELAY_URL)')
   .option('-p, --port <port>', 'Local termcastd port', '7681')
   .option('-w, --web-port <port>', 'Web UI port', '8080')
   .option('-s, --shell <shell>', 'Shell to use')
   .option('--no-tmux', 'Disable auto tmux session')
   .action(async (opts) => {
+    // Resolve the relay before anything else: there is no default, and failing
+    // here must not leave a spawned termcastd behind.
+    const resolvedRelay = resolveRelayUrl(opts.relay);
+    if (!resolvedRelay.ok) {
+      console.error(`\x1b[31m${resolvedRelay.error}\x1b[0m`);
+      process.exit(1);
+    }
+    const relayURL = resolvedRelay.url;
+
     const ttyd = new TtydManager({ port: parseInt(opts.port), shell: opts.shell, tmux: opts.tmux });
     const webUI = new WebUI();
     webUI.setTtydPort(parseInt(opts.port));
@@ -199,7 +209,7 @@ program
 
     // Load or generate keypair and pairing info
     const { generateKeyPair } = await import('./crypto.js');
-    const relayHTTP = opts.relay.replace('wss://', 'https://').replace('ws://', 'http://');
+    const relayHTTP = relayHttpUrl(relayURL);
 
     const savedConfig = loadServerConfig();
     let keyPair: { publicKey: Buffer; privateKey: Buffer };
@@ -211,11 +221,11 @@ program
         privateKey: Buffer.from(savedConfig.privateKey, 'base64'),
         publicKey: Buffer.from(savedConfig.publicKey, 'base64'),
       };
-      currentPairing = generatePairingInfo(opts.relay, Buffer.from(savedConfig.publicKey, 'base64'), savedConfig.deviceId, parseInt(opts.port));
+      currentPairing = generatePairingInfo(relayURL, Buffer.from(savedConfig.publicKey, 'base64'), savedConfig.deviceId, parseInt(opts.port));
       currentPairing = { ...currentPairing, pairingSecret: savedConfig.pairingSecret };
     } else {
       keyPair = generateKeyPair();
-      currentPairing = generatePairingInfo(opts.relay, keyPair.publicKey, undefined, parseInt(opts.port));
+      currentPairing = generatePairingInfo(relayURL, keyPair.publicKey, undefined, parseInt(opts.port));
       saveServerConfig({
         deviceId: currentPairing.deviceId,
         privateKey: keyPair.privateKey.toString('base64'),
@@ -520,7 +530,7 @@ program
     const stateFile = join(stateDir, 'state.json');
     const saveState = () => {
       writeFileSync(stateFile, JSON.stringify({
-        relayURL: opts.relay,
+        relayURL,
         deviceId: currentPairing.deviceId,
         serverPublicKey: keyPair.publicKey.toString('base64'),
         pid: process.pid,
@@ -536,7 +546,7 @@ program
         version,
         serverPid: process.pid,
         uptimeSeconds: (Date.now() - serverStartedAt) / 1000,
-        relay: { url: opts.relay, connected: relay.connected },
+        relay: { url: relayURL, connected: relay.connected },
         ttyd: {
           pid: ttyd.pid,
           port: ttyd.currentPort,

@@ -5,7 +5,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_DIR="$ROOT/relay-server"
 
 # Parse args
-RELAY_URL="${RELAY_URL:-wss://relay.example.com}"
+# No default relay: set RELAY_URL (or TERMCAST_RELAY_URL) to your own.
+RELAY_URL="${RELAY_URL:-${TERMCAST_RELAY_URL:-}}"
+if [ -z "$RELAY_URL" ]; then
+  echo "error: no relay configured. Set RELAY_URL, e.g." >&2
+  echo "  RELAY_URL=wss://relay.example.com $0" >&2
+  exit 1
+fi
 WEB_PORT="${WEB_PORT:-8080}"
 TTYD_PORT="${TTYD_PORT:-7681}"
 SHELL_CMD="${SHELL_CMD:-${SHELL:-/bin/bash}}"
