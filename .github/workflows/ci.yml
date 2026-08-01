@@ -92,7 +92,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+      # Scan the whole history rather than the push's commit range.
+      # gitleaks-action derives `<first-pushed-commit>^..<head>`, which is not a
+      # valid revision when the range begins at a root commit — as on the first
+      # push to a fresh repository — so the job died on a git error before
+      # scanning a single byte. A full scan is also what we actually want here:
+      # a credential is a problem wherever in history it appears, not only in
+      # the commits a given push happened to carry.
+      - name: Install gitleaks
         env:
-          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" gitleaks
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Scan full history
+        run: gitleaks git . --config .gitleaks.toml --no-banner --redact
