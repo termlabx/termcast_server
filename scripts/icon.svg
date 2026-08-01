@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1b2e"/>
+      <stop offset="100%" stop-color="#0d0e1a"/>
+    </linearGradient>
+    <!-- Accent gradient (blue-purple) -->
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7aa2f7"/>
+      <stop offset="100%" stop-color="#bb9af7"/>
+    </linearGradient>
+    <!-- Cast signal gradient -->
+    <linearGradient id="signal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7aa2f7" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#bb9af7" stop-opacity="0.3"/>
+    </linearGradient>
+    <!-- Glow filter -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- Subtle inner shadow -->
+    <filter id="inset">
+      <feGaussianBlur stdDeviation="20" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Background fill (square, Apple applies squircle mask) -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- Subtle radial glow behind terminal -->
+  <circle cx="420" cy="520" r="300" fill="#7aa2f7" opacity="0.06"/>
+
+  <!-- Terminal window -->
+  <rect x="120" y="220" width="580" height="440" rx="32" ry="32"
+        fill="#1e1f33" stroke="#7aa2f7" stroke-width="3" stroke-opacity="0.3"/>
+
+  <!-- Terminal title bar dots -->
+  <circle cx="170" cy="268" r="12" fill="#ff5f57" opacity="0.9"/>
+  <circle cx="210" cy="268" r="12" fill="#febc2e" opacity="0.9"/>
+  <circle cx="250" cy="268" r="12" fill="#28c840" opacity="0.9"/>
+
+  <!-- Terminal content area separator -->
+  <line x1="140" y1="300" x2="680" y2="300" stroke="#7aa2f7" stroke-opacity="0.15" stroke-width="1"/>
+
+  <!-- Prompt: >_ with glow -->
+  <g filter="url(#glow)">
+    <text x="180" y="430" font-family="Menlo, Monaco, 'Courier New', monospace" font-size="120" font-weight="bold" fill="url(#accent)">
+      &gt;_
+    </text>
+  </g>
+
+  <!-- Cursor blink line -->
+  <rect x="390" y="370" width="4" height="70" rx="2" fill="#7aa2f7" opacity="0.8">
+    <animate attributeName="opacity" values="0.8;0.2;0.8" dur="1.2s" repeatCount="indefinite"/>
+  </rect>
+
+  <!-- Faux text lines (dimmed) -->
+  <rect x="180" y="480" width="200" height="8" rx="4" fill="#565f89" opacity="0.4"/>
+  <rect x="180" y="510" width="140" height="8" rx="4" fill="#565f89" opacity="0.25"/>
+  <rect x="180" y="540" width="260" height="8" rx="4" fill="#565f89" opacity="0.15"/>
+
+  <!-- Cast/broadcast arcs (right side) -->
+  <g transform="translate(720, 440)">
+    <!-- Inner arc -->
+    <path d="M 0,0 A 80,80 0 0,1 0,160" fill="none" stroke="url(#accent)" stroke-width="8" stroke-linecap="round" opacity="0.9"/>
+    <!-- Middle arc -->
+    <path d="M 30,-40 A 140,140 0 0,1 30,200" fill="none" stroke="url(#accent)" stroke-width="7" stroke-linecap="round" opacity="0.6"/>
+    <!-- Outer arc -->
+    <path d="M 60,-80 A 200,200 0 0,1 60,240" fill="none" stroke="url(#accent)" stroke-width="6" stroke-linecap="round" opacity="0.35"/>
+    <!-- Outermost arc -->
+    <path d="M 90,-120 A 260,260 0 0,1 90,280" fill="none" stroke="url(#accent)" stroke-width="5" stroke-linecap="round" opacity="0.15"/>
+  </g>
+
+  <!-- Small dot at signal origin -->
+  <circle cx="718" cy="520" r="10" fill="url(#accent)" filter="url(#glow)"/>
+</svg>

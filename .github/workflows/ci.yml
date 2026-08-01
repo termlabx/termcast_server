@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  relay-server:
+    name: relay-server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: relay-server/package-lock.json
+
+      - name: Install
+        working-directory: relay-server
+        run: npm ci
+
+      - name: Build
+        working-directory: relay-server
+        run: npm run build
+
+      # Also runs `vectors:check`, which asserts protocol-vectors/v1.json still
+      # matches the code that generates it. A failure here means the wire
+      # protocol changed — see CONTRIBUTING.md before touching the vectors.
+      - name: Test
+        working-directory: relay-server
+        run: npm test
+
+  relay-desktop:
+    name: relay-desktop
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: relay-desktop/package-lock.json
+
+      - name: Install
+        working-directory: relay-desktop
+        run: npm ci
+
+      - name: Build
+        working-directory: relay-desktop
+        run: npm run build
+
+      - name: Test
+        working-directory: relay-desktop
+        run: npm test
+
+  shell-tests:
+    name: shell tests
+    # Linux only: these exercise the termcast-loop supervisor by spawning and
+    # SIGKILLing real processes, and rely on GNU sed plus an init that reaps
+    # orphans. They are not expected to run on macOS.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Syntax-check scripts
+        run: for f in scripts/*.sh; do bash -n "$f" || exit 1; done
+
+      - name: Install procps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq procps
+
+      - name: Run shell test suites
+        run: |
+          bash scripts/termcast-loop.test.sh
+          bash scripts/termcast-logrotate.test.sh
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml

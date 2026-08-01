@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ttyd Server</title>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background: #1a1b26;
+      color: #c0caf5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-app-region: drag;
+    }
+    .header {
+      padding: 40px 24px 16px;
+      text-align: center;
+    }
+    .header h1 {
+      font-size: 1.4em;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.85em;
+      color: #787c99;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #787c99;
+    }
+    .dot.running { background: #9ece6a; box-shadow: 0 0 6px #9ece6a80; }
+    .dot.stopped { background: #f7768e; }
+    #qr {
+      text-align: center;
+      padding: 16px 24px;
+      flex-shrink: 0;
+      -webkit-app-region: no-drag;
+    }
+    #qr img { border-radius: 8px; max-width: 250px; }
+    #qr p { color: #787c99; font-size: 0.9em; margin-top: 8px; }
+    .logs-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 0 24px 24px;
+      min-height: 0;
+      -webkit-app-region: no-drag;
+    }
+    .logs-section h3 {
+      font-size: 0.8em;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #565f89;
+      margin-bottom: 8px;
+    }
+    #logs {
+      flex: 1;
+      font-family: 'Menlo', 'Monaco', monospace;
+      font-size: 11px;
+      background: #24283b;
+      border-radius: 8px;
+      padding: 12px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #787c99;
+      min-height: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>ttyd Server</h1>
+    <div class="status">
+      <div class="dot" id="statusDot"></div>
+      <span id="statusText">Starting...</span>
+    </div>
+  </div>
+
+  <div id="qr">
+    <p>Waiting for QR code...</p>
+  </div>
+
+  <div class="logs-section">
+    <h3>Server Logs</h3>
+    <div id="logs"></div>
+  </div>
+
+  <script>
+    const logs = document.getElementById('logs');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+
+    window.api.onServerLog((log) => {
+      logs.textContent += log;
+      logs.scrollTop = logs.scrollHeight;
+
+      // Parse QR data URL from server output
+      const match = log.match(/Web UI: (http:\/\/[^\s]+)/);
+      if (match) {
+        fetch(match[1].replace(/\/$/, '') + '/api/pairing')
+          .then(r => r.json())
+          .then(d => {
+            if (d.qr) {
+              document.getElementById('qr').innerHTML =
+                '<img src="' + d.qr + '" width="250"><p>Scan with termcast iphone app to pair</p>';
+            }
+          })
+          .catch(() => {});
+      }
+    });
+
+    window.api.onServerStatus((status) => {
+      if (status === 'running') {
+        statusDot.className = 'dot running';
+        statusText.textContent = 'Running';
+      } else {
+        statusDot.className = 'dot stopped';
+        statusText.textContent = 'Stopped';
+      }
+    });
+  </script>
+</body>
+</html>

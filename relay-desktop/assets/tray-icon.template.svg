@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- Source of truth for the macOS tray icons. scripts/gen-tray-icons.sh
+       substitutes {{FG}} (glyph colour for the menu-bar appearance) and
+       {{BADGE}} (the status overlay), then rasterizes at 1x and 2x.
+
+       The glyph is a solid cat silhouette, matching the shipped
+       trayTemplate.png — its eye/whisker pixels are opaque, so macOS has
+       always drawn this icon as a silhouette. Do not add facial detail here
+       without regenerating trayTemplate.png too. -->
+  <defs>
+    <!-- Punches a transparent halo out of the glyph so the badge stays legible
+         where it overlaps the head. -->
+    <mask id="badge-halo">
+      <rect width="22" height="22" fill="white"/>
+      <circle cx="17.5" cy="17.5" r="5.2" fill="black"/>
+    </mask>
+  </defs>
+
+  <g fill="{{FG}}" mask="url(#badge-halo)">
+    <!-- Left ear -->
+    <path d="M3.5,9 Q3,4 6,3 Q7.5,6 8,8.5 Z"/>
+    <!-- Right ear -->
+    <path d="M18.5,9 Q19,4 16,3 Q14.5,6 14,8.5 Z"/>
+    <!-- Head -->
+    <ellipse cx="11" cy="13" rx="8" ry="6.5"/>
+  </g>
+
+  {{BADGE}}
+</svg>

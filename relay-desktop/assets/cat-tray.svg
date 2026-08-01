@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- Cat face for macOS tray template icon -->
+  <!-- Left ear - rounder, more cat-like -->
+  <path d="M3.5,9 Q3,4 6,3 Q7.5,6 8,8.5 Z" fill="black"/>
+  <!-- Right ear -->
+  <path d="M18.5,9 Q19,4 16,3 Q14.5,6 14,8.5 Z" fill="black"/>
+  <!-- Head - wider, rounder -->
+  <ellipse cx="11" cy="13" rx="8" ry="6.5" fill="black"/>
+  <!-- Left eye -->
+  <ellipse cx="7.5" cy="12" rx="1.5" ry="1.8" fill="white"/>
+  <!-- Left pupil -->
+  <ellipse cx="7.5" cy="12.2" rx="0.7" ry="1.1" fill="black"/>
+  <!-- Right eye -->
+  <ellipse cx="14.5" cy="12" rx="1.5" ry="1.8" fill="white"/>
+  <!-- Right pupil -->
+  <ellipse cx="14.5" cy="12.2" rx="0.7" ry="1.1" fill="black"/>
+  <!-- Nose - small triangle -->
+  <polygon points="11,14.5 10.2,15.5 11.8,15.5" fill="white"/>
+  <!-- Mouth - W shape -->
+  <path d="M9.5,16 Q10.3,17 11,16 Q11.7,17 12.5,16" fill="none" stroke="white" stroke-width="0.6" stroke-linecap="round"/>
+  <!-- Whiskers left -->
+  <line x1="3" y1="14" x2="7" y2="14.5" stroke="white" stroke-width="0.4"/>
+  <line x1="3.5" y1="15.5" x2="7" y2="15.5" stroke="white" stroke-width="0.4"/>
+  <!-- Whiskers right -->
+  <line x1="19" y1="14" x2="15" y2="14.5" stroke="white" stroke-width="0.4"/>
+  <line x1="18.5" y1="15.5" x2="15" y2="15.5" stroke="white" stroke-width="0.4"/>
+</svg>

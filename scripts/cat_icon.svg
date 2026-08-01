@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background gradient - soft warm teal -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2D3E50"/>
+      <stop offset="100%" stop-color="#1A2A3A"/>
+    </linearGradient>
+    <!-- Cat body gradient -->
+    <linearGradient id="catFur" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFF5E6"/>
+      <stop offset="100%" stop-color="#F5DEB3"/>
+    </linearGradient>
+    <!-- Terminal screen glow -->
+    <radialGradient id="screenGlow" cx="0.5" cy="0.4" r="0.5">
+      <stop offset="0%" stop-color="#1a1a2e" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0d0d1a"/>
+    </radialGradient>
+    <!-- Eye gradient -->
+    <radialGradient id="eyeBlue" cx="0.45" cy="0.4" r="0.5">
+      <stop offset="0%" stop-color="#87CEEB"/>
+      <stop offset="60%" stop-color="#4A90D9"/>
+      <stop offset="100%" stop-color="#2E6EB5"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background - rounded square -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- Terminal window -->
+  <rect x="112" y="160" width="800" height="560" rx="32" fill="#1a1a2e" stroke="#3a3a5c" stroke-width="4"/>
+
+  <!-- Terminal title bar -->
+  <rect x="112" y="160" width="800" height="56" rx="32" fill="#2a2a4a"/>
+  <rect x="112" y="192" width="800" height="24" fill="#2a2a4a"/>
+
+  <!-- Traffic light dots -->
+  <circle cx="164" cy="188" r="12" fill="#FF5F57"/>
+  <circle cx="204" cy="188" r="12" fill="#FFBD2E"/>
+  <circle cx="244" cy="188" r="12" fill="#28CA41"/>
+
+  <!-- Terminal title text -->
+  <text x="512" y="196" text-anchor="middle" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#8888aa" font-weight="600">ttyd ~ terminal</text>
+
+  <!-- Terminal text lines (faint) -->
+  <text x="152" y="270" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#4EC9B0" opacity="0.7">$</text>
+  <text x="180" y="270" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#6A9955" opacity="0.5"> ssh server</text>
+
+  <text x="152" y="302" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#4EC9B0" opacity="0.7">$</text>
+  <text x="180" y="302" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#6A9955" opacity="0.5"> connected!</text>
+
+  <text x="152" y="334" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#4EC9B0" opacity="0.7">$</text>
+  <text x="180" y="334" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#DCDCAA" opacity="0.5"> meow~</text>
+
+  <text x="152" y="366" font-family="SF Mono, Menlo, monospace" font-size="22" fill="#4EC9B0" opacity="0.6">$ _</text>
+
+  <!-- Cat peeking from bottom of terminal - just head and paws -->
+  <!-- Cat face - main shape peeking up from bottom -->
+  <g transform="translate(512, 620)">
+
+    <!-- Cat ears (behind head) -->
+    <!-- Left ear outer -->
+    <path d="M-145,-95 L-185,-210 L-90,-140 Z" fill="#F5DEB3" stroke="#E8D5A0" stroke-width="2"/>
+    <!-- Left ear inner -->
+    <path d="M-140,-105 L-170,-195 L-100,-140 Z" fill="#FFB6C1"/>
+
+    <!-- Right ear outer -->
+    <path d="M145,-95 L185,-210 L90,-140 Z" fill="#F5DEB3" stroke="#E8D5A0" stroke-width="2"/>
+    <!-- Right ear inner -->
+    <path d="M150,-105 L170,-195 L100,-140 Z" fill="#FFB6C1"/>
+
+    <!-- Head shape -->
+    <ellipse cx="0" cy="-20" rx="165" ry="140" fill="url(#catFur)"/>
+
+    <!-- Subtle tabby markings on forehead -->
+    <path d="M-30,-120 L0,-145 L30,-120" fill="none" stroke="#E8C888" stroke-width="5" stroke-linecap="round" opacity="0.4"/>
+    <path d="M-20,-105 L0,-125 L20,-105" fill="none" stroke="#E8C888" stroke-width="4" stroke-linecap="round" opacity="0.3"/>
+
+    <!-- Eyes -->
+    <!-- Left eye -->
+    <ellipse cx="-60" cy="-45" rx="38" ry="36" fill="white"/>
+    <ellipse cx="-58" cy="-43" rx="28" ry="28" fill="url(#eyeBlue)"/>
+    <ellipse cx="-58" cy="-43" rx="18" ry="20" fill="#1a1a2e"/>
+    <!-- Eye shine -->
+    <ellipse cx="-50" cy="-55" rx="8" ry="7" fill="white" opacity="0.9"/>
+    <ellipse cx="-64" cy="-38" rx="4" ry="3" fill="white" opacity="0.5"/>
+
+    <!-- Right eye -->
+    <ellipse cx="60" cy="-45" rx="38" ry="36" fill="white"/>
+    <ellipse cx="62" cy="-43" rx="28" ry="28" fill="url(#eyeBlue)"/>
+    <ellipse cx="62" cy="-43" rx="18" ry="20" fill="#1a1a2e"/>
+    <!-- Eye shine -->
+    <ellipse cx="70" cy="-55" rx="8" ry="7" fill="white" opacity="0.9"/>
+    <ellipse cx="56" cy="-38" rx="4" ry="3" fill="white" opacity="0.5"/>
+
+    <!-- Nose -->
+    <path d="M0,5 L-10,18 L10,18 Z" fill="#FFB0B0" stroke="#E8A0A0" stroke-width="1"/>
+
+    <!-- Mouth -->
+    <path d="M0,18 Q-15,35 -30,28" fill="none" stroke="#D4A574" stroke-width="3" stroke-linecap="round"/>
+    <path d="M0,18 Q15,35 30,28" fill="none" stroke="#D4A574" stroke-width="3" stroke-linecap="round"/>
+
+    <!-- Whiskers -->
+    <!-- Left whiskers -->
+    <line x1="-45" y1="10" x2="-140" y2="-5" stroke="#D4B896" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="-45" y1="18" x2="-145" y2="18" stroke="#D4B896" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="-45" y1="26" x2="-140" y2="38" stroke="#D4B896" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Right whiskers -->
+    <line x1="45" y1="10" x2="140" y2="-5" stroke="#D4B896" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="45" y1="18" x2="145" y2="18" stroke="#D4B896" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="45" y1="26" x2="140" y2="38" stroke="#D4B896" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Paws resting on terminal edge -->
+    <!-- Left paw -->
+    <ellipse cx="-100" cy="105" rx="50" ry="28" fill="url(#catFur)" stroke="#E8D5A0" stroke-width="2"/>
+    <!-- Paw toe lines -->
+    <path d="M-120,95 Q-120,108 -118,115" fill="none" stroke="#E0CFA0" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M-100,92 Q-100,108 -100,115" fill="none" stroke="#E0CFA0" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M-80,95 Q-80,108 -82,115" fill="none" stroke="#E0CFA0" stroke-width="2.5" stroke-linecap="round"/>
+
+    <!-- Right paw -->
+    <ellipse cx="100" cy="105" rx="50" ry="28" fill="url(#catFur)" stroke="#E8D5A0" stroke-width="2"/>
+    <!-- Paw toe lines -->
+    <path d="M80,95 Q80,108 82,115" fill="none" stroke="#E0CFA0" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M100,92 Q100,108 100,115" fill="none" stroke="#E0CFA0" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M120,95 Q120,108 118,115" fill="none" stroke="#E0CFA0" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- Subtle ">_" terminal cursor icon on bottom -->
+  <text x="512" y="870" text-anchor="middle" font-family="SF Mono, Menlo, monospace" font-size="48" fill="#4EC9B0" opacity="0.5" font-weight="bold">&gt;_</text>
+</svg>

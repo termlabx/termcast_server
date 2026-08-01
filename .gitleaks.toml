@@ -1,0 +1,31 @@
+# gitleaks configuration for termcast_server.
+#
+# Run locally before opening a PR:
+#   gitleaks dir . --no-banner --redact
+#
+# Nothing in this repository should contain a credential. If a scan flags
+# something new, treat it as real until proven otherwise — do not extend the
+# allowlist to silence it.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+description = """
+protocol-vectors/v1.json holds known-answer test vectors, not secrets. Its
+X25519 key pairs are the values published in RFC 7748 section 6.1 — public
+IETF specification test data, reproduced in essentially every X25519 library's
+test suite. The derived shared secret and AES key are deterministic functions
+of those public inputs. None of it is used as a production key.
+"""
+paths = ['''protocol-vectors/v1\.json''']
+
+[allowlist]
+description = "Paths that never contain source we ship"
+paths = [
+  '''node_modules''',
+  '''package-lock\.json''',
+  '''\.iconset''',
+]

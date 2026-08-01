@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#2d3142"/>
+      <stop offset="100%" style="stop-color:#1e2030"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="660" height="400" fill="url(#bg)"/>
+
+  <!-- "Meo~" speech bubble area at top -->
+  <!-- Speech bubble -->
+  <rect x="200" y="30" width="260" height="70" rx="20" ry="20" fill="#3a3f55" opacity="0.7"/>
+  <!-- Bubble tail pointing down-left toward cat icon area -->
+  <polygon points="260,100 240,120 280,100" fill="#3a3f55" opacity="0.7"/>
+
+  <!-- Meo~ text -->
+  <text x="330" y="60" font-family="Arial, Helvetica, sans-serif" font-size="26" font-weight="bold" fill="#f0c674" text-anchor="middle">Meo~ </text>
+  <text x="330" y="85" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#a0a8c0" text-anchor="middle">Drag me to Applications to install!</text>
+
+  <!-- Arrow from app icon to Applications -->
+  <!-- Positioned between the two icon positions (app ~165, applications ~495) -->
+  <text x="330" y="260" font-family="Arial, Helvetica, sans-serif" font-size="36" font-weight="bold" fill="#f0c674" text-anchor="middle">› › › ›</text>
+
+  <!-- Small cat paw prints as decoration -->
+  <!-- Paw 1 -->
+  <circle cx="290" cy="310" r="3" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="283" cy="305" r="2" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="297" cy="305" r="2" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="290" cy="302" r="2" fill="#4a4f65" opacity="0.5"/>
+
+  <!-- Paw 2 -->
+  <circle cx="340" cy="295" r="3" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="333" cy="290" r="2" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="347" cy="290" r="2" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="340" cy="287" r="2" fill="#4a4f65" opacity="0.5"/>
+
+  <!-- Paw 3 -->
+  <circle cx="380" cy="315" r="3" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="373" cy="310" r="2" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="387" cy="310" r="2" fill="#4a4f65" opacity="0.5"/>
+  <circle cx="380" cy="307" r="2" fill="#4a4f65" opacity="0.5"/>
+</svg>

@@ -1,0 +1,40 @@
+Termcast Server
+Copyright (C) 2026 ulixlab
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See LICENSE for the full text.
+
+If you run a modified version of this software as a network service, the AGPL
+requires you to offer the complete corresponding source of your modified
+version to the users of that service.
+
+
+────────────────────────────────────────────────────────────────────────────
+Third-party components
+────────────────────────────────────────────────────────────────────────────
+
+Termcast bundles or downloads the following programs at build time. They are
+separate works, distributed under their own licenses, and are not covered by
+the AGPL grant above. The build scripts under scripts/ fetch them from their
+upstream sources; none of their source is vendored in this repository.
+
+  ttyd            MIT License        https://github.com/tsl0922/ttyd
+  tmux            ISC License        https://github.com/tmux/tmux
+  libwebsockets   MIT License        https://github.com/warmcat/libwebsockets
+  utf8proc        MIT License        https://github.com/JuliaStrings/utf8proc
+  ncurses         X11-style License  https://invisible-island.net/ncurses/
+
+Node.js dependencies are declared in relay-server/package.json and
+relay-desktop/package.json; their licenses are recorded in the corresponding
+package-lock.json files and in each package's own distribution.
+
+────────────────────────────────────────────────────────────────────────────
+Protocol test vectors
+────────────────────────────────────────────────────────────────────────────
+
+protocol-vectors/v1.json embeds the X25519 key pairs published in RFC 7748
+section 6.1. Those values are public test vectors from the IETF specification
+and carry no confidentiality expectation. They are test data only and are
+never used as production keys.

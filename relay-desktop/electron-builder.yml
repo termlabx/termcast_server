@@ -1,0 +1,88 @@
+appId: com.ulixlab.termcast
+productName: Termcast
+copyright: Copyright © 2026 ulixlab
+directories:
+  output: release
+
+extraResources:
+  - from: ../relay-server/dist
+    to: relay-server/dist
+  - from: ../relay-server/package.json
+    to: relay-server/package.json
+  - from: ../relay-server/node_modules
+    to: relay-server/node_modules
+    filter:
+      - "**/*"
+      - "!.cache"
+      - "!**/typescript/**"
+      - "!**/esbuild/**"
+      - "!**/@esbuild/**"
+      - "!**/@types/**"
+      - "!**/tsx/**"
+      - "!**/.package-lock.json"
+      - "!**/README.md"
+      - "!**/CHANGELOG.md"
+      - "!**/LICENSE"
+      - "!**/*.d.ts"
+      - "!**/*.map"
+      - "!**/*.ts"
+  - from: ../relay-server/bin/ttyd-darwin-arm64
+    to: relay-server/bin/ttyd-darwin-arm64
+
+files:
+  - dist/**/*.js
+  - assets/trayTemplate.png
+  - assets/trayTemplate@2x.png
+  # Status-badge tray icons (see scripts/gen-tray-icons.sh). src/tray-icons.test.ts
+  # asserts every mapped file exists, so a name change here fails the test run.
+  - assets/tray-connected-*.png
+  - assets/tray-connecting-*.png
+  - assets/tray-offline-*.png
+  - package.json
+  - "!node_modules/electron/**"
+  - "!node_modules/electron-builder/**"
+  - "!node_modules/typescript/**"
+  - "!node_modules/@types/**"
+  - "!node_modules/javascript-obfuscator/**"
+  - "!**/*.ts"
+  - "!**/*.map"
+  - "!**/*.d.ts"
+
+asar: true
+compression: maximum
+
+mac:
+  icon: assets/icon.icns
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.plist
+  # electron-builder >= 26 takes a boolean here; the team id comes from the
+  # APPLE_TEAM_ID env var, which build-notarized-dmg.sh exports before packaging.
+  notarize: true
+  target:
+    - target: dmg
+      arch: [arm64]
+
+dmg:
+  artifactName: Termcast.dmg
+  icon: assets/icon.icns
+  background: assets/dmg-background.png
+  window:
+    width: 660
+    height: 400
+  contents:
+    - x: 165
+      y: 245
+      type: file
+    - x: 495
+      y: 245
+      type: link
+      path: /Applications
+
+win:
+  target: [nsis]
+
+linux:
+  target: [deb, AppImage]
+  category: Development

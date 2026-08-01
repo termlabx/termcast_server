@@ -1,0 +1,56 @@
+{
+  "name": "@termcast/cli",
+  "version": "0.146.0",
+  "description": "Termcast relay server CLI \u2014 access your terminal from anywhere",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "bin": {
+    "termcast": "dist/index.js"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "dist/",
+    "scripts/postinstall.mjs",
+    "scripts/download.mjs",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc && mkdir -p dist/assets && cp src/assets/*.js dist/assets/",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "postinstall": "node scripts/postinstall.mjs",
+    "test": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/membership.test.ts src/ttyd-restart-policy.test.ts src/pairing.test.ts src/pairing-wrap.test.ts src/mesh-identity.test.ts src/protocol-vectors.test.ts && node --test scripts/download.test.mjs && npm run vectors:check",
+    "vectors": "tsx scripts/generate-protocol-vectors.ts",
+    "vectors:check": "tsx scripts/generate-protocol-vectors.ts --check",
+    "test:integration": "tsx --test src/port-forward-integration.test.ts",
+    "test:all": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/port-forward-integration.test.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "qrcode": "^1.5.4",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/ws": "^8.5.14",
+    "@types/qrcode": "^1.5.5",
+    "@types/node": "^24.0.0"
+  },
+  "author": "ulixlab",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/termlabx/termcast_server.git"
+  },
+  "homepage": "https://github.com/termlabx/termcast_server"
+}

@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+dist/
+
+# Electron build output
+relay-desktop/release/
+
+# Native binaries — fetched or built locally, never committed
+relay-server/bin/
+scripts/build/
+
+# Logs
+*.log
+
+# Local credentials — never commit these
+.build-secrets.env
+*.p12
+*.mobileprovision
