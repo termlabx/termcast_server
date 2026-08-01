@@ -2,9 +2,9 @@
   "name": "termcast-desktop",
   "productName": "Termcast",
   "license": "AGPL-3.0-or-later",
-  "version": "0.146.0",
+  "version": "0.148.0",
   "author": "ulixlab@2026",
-  "copyright": "Copyright \u00a9 2026 ulixlab",
+  "copyright": "Copyright © 2026 ulixlab",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
