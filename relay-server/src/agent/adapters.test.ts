@@ -74,13 +74,39 @@ test('ClaudeAdapter.subscribe: replays messages after sinceSeq then stops on uns
   assert.deepEqual(seen, [1]);
 });
 
-test('ClaudeAdapter.send: throws AgentUnsupportedError until phase 2', async () => {
+test('ClaudeAdapter.send: an unknown session reports failure rather than silently dropping', async () => {
   const root = claudeRoot('s1', [line('one')]);
 
-  await assert.rejects(
-    () => new ClaudeAdapter(root).send('s1', 'hi'),
-    (err: Error) => err instanceof AgentUnsupportedError,
-  );
+  await assert.rejects(() => new ClaudeAdapter(root).send('nope', 'hi'));
+});
+
+test('ClaudeAdapter.send: a known idle session starts an SDK session and accepts the text', async () => {
+  const root = claudeRoot('s1', [line('one')]);
+  const adapter = new ClaudeAdapter(root);
+  const started: string[] = [];
+  adapter.setSessionFactory((sessionId) => {
+    started.push(sessionId);
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+  });
+
+  await adapter.send('s1', 'hello');
+
+  assert.deepEqual(started, ['s1']);
+});
+
+test('ClaudeAdapter.send: a second message reuses the same SDK session', async () => {
+  const root = claudeRoot('s1', [line('one')]);
+  const adapter = new ClaudeAdapter(root);
+  let created = 0;
+  adapter.setSessionFactory(() => {
+    created += 1;
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+  });
+
+  await adapter.send('s1', 'one');
+  await adapter.send('s1', 'two');
+
+  assert.equal(created, 1);
 });
 
 test('OpencodeAdapter.list: forwards the client result', async () => {

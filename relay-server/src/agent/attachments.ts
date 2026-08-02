@@ -53,6 +53,13 @@ export class AttachmentManager {
     return [...new Set([...this.byConn.values()].map((a) => a.sessionId))];
   }
 
+  /** Connections currently watching a session. */
+  connectionsFor(sessionId: string): number[] {
+    return [...this.byConn.entries()]
+      .filter(([, attachment]) => attachment.sessionId === sessionId)
+      .map(([connId]) => connId);
+  }
+
   isAttached(sessionId: string): boolean {
     return [...this.byConn.values()].some((a) => a.sessionId === sessionId);
   }

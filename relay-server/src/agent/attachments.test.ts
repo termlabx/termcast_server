@@ -81,3 +81,14 @@ test('isAttached: true only while some connection holds the session', async () =
   manager.detach(1);
   assert.equal(manager.isAttached('s1'), false);
 });
+
+test('connectionsFor: lists every connection watching a session', async () => {
+  const { adapter } = countingAdapter();
+  const manager = new AttachmentManager(new AgentRegistry([adapter]));
+
+  await manager.attach(1, 'claude', 's1', 0, () => {});
+  await manager.attach(2, 'claude', 's1', 0, () => {});
+  await manager.attach(3, 'claude', 's2', 0, () => {});
+
+  assert.deepEqual(manager.connectionsFor('s1').sort(), [1, 2]);
+});

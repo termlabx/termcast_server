@@ -646,6 +646,32 @@ program
     bridge.on('agent_detach', ({ connId }: { connId: number }) => attachments.detach(connId));
     bridge.on('agent_detach_all', () => attachments.detachAll());
 
+    // SDK sessions have no transcript to tail, so their events are pushed to
+    // every connection currently attached to that session.
+    const claudeAdapter = agentAdapters[0] as ClaudeAdapter;
+    claudeAdapter.setEventSink((event) => {
+      for (const connId of attachments.connectionsFor(event.sessionId)) {
+        bridge.sendAgentFrame(connId, AGENT_EVENT, event);
+      }
+    });
+
+    bridge.on('agent_send', async (req: { connId: number; agent: AgentKind; sessionId: string; text: string }) => {
+      const adapter = agentRegistry.adapterFor(req.agent);
+      if (!adapter) return;
+      try {
+        await adapter.send(req.sessionId, req.text);
+      } catch (err) {
+        bridge.sendAgentFrame(req.connId, AGENT_EVENT, {
+          kind: 'status', sessionId: req.sessionId, seq: -1,
+          status: 'error', detail: (err as Error).message,
+        });
+      }
+    });
+
+    bridge.on('agent_interrupt', async (req: { connId: number; agent: AgentKind; sessionId: string }) => {
+      await agentRegistry.adapterFor(req.agent)?.interrupt(req.sessionId).catch(() => {});
+    });
+
     // CLI-driven forward add/remove (POST /api/mesh/forwards).
     webUI.setMeshForwardHandler((raw: unknown) => {
       const change = raw as ForwardChange;
