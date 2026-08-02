@@ -1,5 +1,6 @@
 import type { AgentAdapter, AgentEvent, HistoryPage, Unsubscribe } from './adapter.js';
 import type { AgentKind, AgentSessionSummary } from './types.js';
+import { readLiveSessions, applyLiveness } from './session-registry.js';
 
 /**
  * Fans requests out across the installed adapters and routes by (agent, id).
@@ -28,9 +29,12 @@ export class AgentRegistry {
       }),
     );
 
-    return results
-      .flat()
-      .sort((a, b) => (b.lastActiveAt ?? '').localeCompare(a.lastActiveAt ?? ''));
+    return applyLiveness(
+      results
+        .flat()
+        .sort((a, b) => (b.lastActiveAt ?? '').localeCompare(a.lastActiveAt ?? '')),
+      readLiveSessions(),
+    );
   }
 
   async history(kind: AgentKind, sessionId: string, beforeSeq: number | null, limit: number): Promise<HistoryPage> {
