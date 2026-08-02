@@ -109,6 +109,51 @@ test('ClaudeAdapter.send: a second message reuses the same SDK session', async (
   assert.equal(created, 1);
 });
 
+test('ClaudeAdapter.send: a live session injects into its pane instead of starting an SDK session', async () => {
+  const root = claudeRoot('s1', [line('one')]);
+  const adapter = new ClaudeAdapter(root);
+  const injected: string[] = [];
+  let sdkStarted = false;
+
+  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
+  adapter.setInjector(async (paneId, text) => { injected.push(`${paneId}:${text}`); return true; });
+  adapter.setSessionFactory(() => {
+    sdkStarted = true;
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+  });
+
+  await adapter.send('s1', 'hello');
+
+  assert.deepEqual(injected, ['%3:hello']);
+  assert.equal(sdkStarted, false);
+});
+
+test('ClaudeAdapter.send: a busy pane reports rather than interleaving with the desk', async () => {
+  const root = claudeRoot('s1', [line('one')]);
+  const adapter = new ClaudeAdapter(root);
+  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
+  adapter.setInjector(async () => false);
+
+  await assert.rejects(() => adapter.send('s1', 'hello'), /busy/i);
+});
+
+test('ClaudeAdapter.send: a live session with no pane falls back to the SDK', async () => {
+  // multiplexer: none has no injection mechanism at all.
+  const root = claudeRoot('s1', [line('one')]);
+  const adapter = new ClaudeAdapter(root);
+  let sdkStarted = false;
+
+  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: null }]);
+  adapter.setSessionFactory(() => {
+    sdkStarted = true;
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+  });
+
+  await adapter.send('s1', 'hello');
+
+  assert.equal(sdkStarted, true);
+});
+
 test('OpencodeAdapter.list: forwards the client result', async () => {
   const adapter = new OpencodeAdapter(new OpencodeClient('http://127.0.0.1:1'));
 

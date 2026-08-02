@@ -1,10 +1,32 @@
 import { join } from 'node:path';
 import { readdir } from 'node:fs/promises';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
 import type { AgentSessionSummary } from './types.js';
 import { discoverClaudeSessions, defaultProjectsRoot } from './claude-discovery.js';
 import { readMessagesSince, TranscriptTail } from './claude-tail.js';
 import { ClaudeSdkSession } from './claude-sdk-session.js';
+import { readLiveSessions, type LiveSession } from './session-registry.js';
+import { sendKeysCommand } from '../multiplexer.js';
+
+const run = promisify(exec);
+
+/** Returns false when the pane already has typed input we would interleave with. */
+export async function paneIsIdle(paneId: string): Promise<boolean> {
+  try {
+    const { stdout } = await run(`tmux display-message -p -t '${paneId.replace(/'/g, '')}' '#{pane_in_mode}:#{cursor_x}'`);
+    const [inMode, cursorX] = stdout.trim().split(':');
+    // A non-zero cursor column means a partially typed line is sitting there.
+    return inMode === '0' && cursorX === '0';
+  } catch {
+    // Cannot tell — assume idle rather than blocking the phone entirely.
+    return true;
+  }
+}
+
+export type Injector = (paneId: string, text: string) => Promise<boolean>;
+export type LiveLookup = () => LiveSession[];
 
 /** The slice of ClaudeSdkSession the adapter depends on, so tests can substitute it. */
 export interface SdkSessionLike {
@@ -52,10 +74,28 @@ export class ClaudeAdapter implements AgentAdapter {
   private sessionFactory: SdkSessionFactory =
     (sessionId, cwd) => new ClaudeSdkSession(sessionId, cwd);
   private eventSink: ((event: AgentEvent) => void) | null = null;
+  private liveLookup: LiveLookup = () => readLiveSessions();
+  private injector: Injector = async (paneId, text) => {
+    if (!(await paneIsIdle(paneId))) return false;
+    const command = sendKeysCommand(paneId, text, 'tmux');
+    if (!command) return false;
+    await run(command);
+    return true;
+  };
 
   /** Test seam. Production uses the default ClaudeSdkSession factory. */
   setSessionFactory(factory: SdkSessionFactory): void {
     this.sessionFactory = factory;
+  }
+
+  /** Test seam. Production uses the real session registry. */
+  setLiveLookup(lookup: LiveLookup): void {
+    this.liveLookup = lookup;
+  }
+
+  /** Test seam. Production injects into tmux with an idle-input guard. */
+  setInjector(injector: Injector): void {
+    this.injector = injector;
   }
 
   /** Where SDK-originated events go, since they have no transcript to tail. */
@@ -93,6 +133,16 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async send(sessionId: string, text: string): Promise<void> {
+    const live = this.liveLookup().find((entry) => entry.sessionId === sessionId);
+
+    // A live session belongs to whoever is sitting at the desk: drive the real
+    // pane rather than starting a second agent against the same repo.
+    if (live?.paneId) {
+      const delivered = await this.injector(live.paneId, text);
+      if (!delivered) throw new Error('That session is busy at the desk — someone is typing in it.');
+      return;
+    }
+
     let session = this.sdkSessions.get(sessionId);
     if (!session) {
       const path = await transcriptPathFor(this.projectsRoot, sessionId);
