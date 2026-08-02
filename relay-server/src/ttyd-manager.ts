@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 import { homedir, hostname, platform, userInfo } from 'node:os';
 import { ensureAugmentedIndex } from './ttyd-index.js';
+import { Multiplexer } from './multiplexer.js';
+import { downloadHerdr, herdrAssetName } from './herdr-install.js';
 import { resolveBaseUrl, releaseUrl } from './upgrade.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,21 +27,51 @@ function terminalTitle(): string {
 }
 
 /**
- * argv for ttyd so that a per-connection `?arg=<phoneId>` (enabled by ttyd's
- * `--url-arg`) lands in `$1` and selects/creates a per-phone tmux session
- * `tc_<sanitized phoneId>`. With no url-arg (browser/local view), `$1` is unset
- * and the session is `tc_shared`. The sanitisation MUST match
- * membership.ts `sessionNameFor`.
+ * argv for ttyd so that per-connection `?arg=` values (enabled by ttyd's
+ * `--url-arg`) select both the session and the multiplexer: `$1` is the phone
+ * id, `$2` is `tmux` | `herdr` | `none`. With no url-args (browser/local view),
+ * `$1` is `shared` and `$2` comes from the sidecar file.
+ *
+ * Phones always send `$2` (bridge.ts). Everything else falls back to the
+ * sidecar, which is rewritten whenever the setting changes — so a switch
+ * applies without respawning ttyd and without dropping connections.
+ *
+ * The script MUST stay POSIX-portable. `shell` is whatever $SHELL points to,
+ * which on Debian/Ubuntu servers is /bin/sh (dash) — dash aborts bashisms like
+ * `${s//pat/rep}` with "Bad substitution", killing the session before the
+ * multiplexer ever runs. `tr -c 'A-Za-z0-9_' '_'` works in dash, bash, and
+ * busybox ash. Same reason there is no JSON parsing here: the setting lives in
+ * a one-word sidecar file rather than config.json.
+ *
+ * The `tc_`/`tch_` prefixes and the sanitisation MUST match multiplexer.ts
+ * `sessionNameFor()`.
  */
-export function buildTmuxShellArgs(shell: string, tmuxPath: string): string[] {
-  // Sanitise with POSIX-portable `tr` rather than bash's `${s//pat/rep}`
-  // expansion: `shell` is whatever $SHELL points to, which on Debian/Ubuntu
-  // servers is /bin/sh (dash) — dash aborts the bashism with "Bad substitution",
-  // killing the session before tmux ever runs. `tr -c 'A-Za-z0-9_' '_'` matches
-  // membership.ts sessionNameFor() and works in dash, bash, and busybox ash.
-  const script =
-    's="${1:-shared}"; s="tc_$(printf %s "$s" | tr -c \'A-Za-z0-9_\' \'_\')"; ' +
-    `exec '${tmuxPath}' new-session -A -s "$s"`;
+export function buildMultiplexerShellArgs(opts: {
+  shell: string;
+  tmuxPath: string | null;
+  herdrPath: string | null;
+  sidecarPath: string;
+  fallback: Multiplexer;
+}): string[] {
+  const { shell, tmuxPath, herdrPath, sidecarPath, fallback } = opts;
+
+  // Only resolved binaries get a branch; anything unresolved falls through to
+  // the default, which degrades to a bare shell when tmux is missing too.
+  const branches: string[] = [];
+  if (herdrPath) branches.push(`  herdr) exec '${herdrPath}' --session "tch_$s" ;;`);
+  branches.push(`  none) exec '${shell}' ;;`);
+  branches.push(tmuxPath
+    ? `  *) exec '${tmuxPath}' new-session -A -s "tc_$s" ;;`
+    : `  *) exec '${shell}' ;;`);
+
+  const script = [
+    `s="\${1:-shared}"; m="\${2:-$(cat '${sidecarPath}' 2>/dev/null || echo ${fallback})}"`,
+    `s="$(printf %s "$s" | tr -c 'A-Za-z0-9_' '_')"`,
+    'case "$m" in',
+    ...branches,
+    'esac',
+  ].join('\n');
+
   return [shell, '-c', script, 'termcast'];
 }
 
@@ -48,18 +80,18 @@ export class TtydManager extends EventEmitter {
   private orphanPid: number | null = null;
   private port: number;
   private shell: string;
-  private tmux: boolean;
+  private multiplexer: Multiplexer;
   private startedAt: number | null = null;
   private readonly pidFile = join(homedir(), '.termcast', 'termcastd.pid');
   // Legacy pidfile from before the ttyd→termcastd rename; still honoured when
   // adopting an orphan so upgrades don't leave a stray process behind.
   private readonly legacyPidFile = join(homedir(), '.termcast', 'ttyd.pid');
 
-  constructor(options: { port?: number; shell?: string; tmux?: boolean } = {}) {
+  constructor(options: { port?: number; shell?: string; multiplexer?: Multiplexer } = {}) {
     super();
     this.port = options.port || 7681;
     this.shell = options.shell || process.env.SHELL || '/bin/bash';
-    this.tmux = options.tmux !== false;
+    this.multiplexer = options.multiplexer ?? 'tmux';
   }
 
   get wsURL(): string {
@@ -140,17 +172,26 @@ export class TtydManager extends EventEmitter {
       process.exit(1);
     }
 
+    // Resolve BOTH multiplexers regardless of which is currently selected: the
+    // wrapper script dispatches per connection, so a later switch must not need
+    // a respawn. `none` skips resolution entirely.
     let tmuxPath: string | null = null;
-    if (this.tmux) {
+    let herdrPath: string | null = null;
+    if (this.multiplexer !== 'none') {
       tmuxPath = await this.findOrInstallTmux();
-      if (!tmuxPath) {
-        console.log('tmux not available — starting shell without tmux');
+      herdrPath = await this.findOrInstallHerdr();
+      if (!tmuxPath && !herdrPath) {
+        console.log('no multiplexer available — starting a plain shell');
       }
     }
 
-    const shellArgs = tmuxPath
-      ? buildTmuxShellArgs(this.shell, tmuxPath)
-      : [this.shell];
+    const shellArgs = buildMultiplexerShellArgs({
+      shell: this.shell,
+      tmuxPath,
+      herdrPath,
+      sidecarPath: join(homedir(), '.ttyd-server', 'multiplexer'),
+      fallback: this.multiplexer,
+    });
 
     // Serve an augmented client (ttyd's own client plus our injected clipboard
     // script) so the browser view gets mouse-select-to-copy and Ctrl/Cmd+V
@@ -309,6 +350,56 @@ export class TtydManager extends EventEmitter {
     } catch (err) {
       console.log(`tmux unavailable (${(err as Error).message}) — using bash fallback`);
       try { unlinkSync(join(homedir(), '.termcast', 'bin', binaryName)); } catch {}
+      return null;
+    }
+  }
+
+  /**
+   * Resolve herdr, downloading it only when it is the selected multiplexer.
+   *
+   * Unlike tmux we do NOT download speculatively: the binary is ~17MB and a
+   * tmux user would never run it. An already-present herdr is always resolved
+   * though, so switching to it later needs no respawn.
+   *
+   * Failure is never fatal — the wrapper script simply gets no herdr branch.
+   */
+  private async findOrInstallHerdr(): Promise<string | null> {
+    const binaryName = herdrAssetName(process.platform, process.arch);
+    const downloadDir = join(homedir(), '.termcast', 'bin');
+    const downloadedPath = join(downloadDir, 'herdr');
+
+    try {
+      // 1. Bundled binary (shipped with the app)
+      for (const p of [
+        join(__dirname, '..', 'bin', 'herdr'),
+        join(__dirname, '..', '..', 'bin', 'herdr'),
+      ]) {
+        if (existsSync(p)) return p;
+      }
+
+      // 2. Previously downloaded binary
+      if (existsSync(downloadedPath)) return downloadedPath;
+
+      // 3. System herdr (brew / curl install)
+      try {
+        const systemPath = execSync('which herdr', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        if (systemPath) return systemPath;
+      } catch {}
+
+      // 4. Download — only when the user actually selected herdr.
+      if (this.multiplexer !== 'herdr') return null;
+      if (!binaryName) {
+        console.log(`herdr has no build for ${process.platform}-${process.arch}`);
+        return null;
+      }
+      console.log(`herdr not found — downloading for ${process.platform}-${process.arch}...`);
+      await downloadHerdr(downloadedPath);
+      console.log('herdr ready');
+      return downloadedPath;
+    } catch (err) {
+      console.log(`herdr unavailable (${(err as Error).message})`);
+      // A partial or unverified download must not linger and be trusted next start.
+      try { unlinkSync(downloadedPath); } catch {}
       return null;
     }
   }

@@ -178,7 +178,11 @@ program
     }
     const relayURL = resolvedRelay.url;
 
-    const ttyd = new TtydManager({ port: parseInt(opts.port), shell: opts.shell, tmux: opts.tmux });
+    const ttyd = new TtydManager({
+      port: parseInt(opts.port),
+      shell: opts.shell,
+      multiplexer: opts.tmux === false ? 'none' : 'tmux',
+    });
     const webUI = new WebUI();
     webUI.setTtydPort(parseInt(opts.port));
 
