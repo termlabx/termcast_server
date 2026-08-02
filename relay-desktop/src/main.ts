@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, createWriteStream, renameSync, statSync, WriteStream } from 'node:fs';
 import { homedir } from 'node:os';
 import { spawn, ChildProcess } from 'node:child_process';
-import { parseClientLogEvents } from './server-log-parser';
+import { parseClientLogEvents, parseMultiplexerLogEvent } from './server-log-parser';
 import { forwardLabel, versionLabel, statusDot, clientLabel, clientDetailLines, clientDevice, isServerClient, peerDetailLines, trayTooltip, type ForwardState } from './tray-format';
 import { trayStatus, type TrayStatus } from './tray-status';
 import { trayIconFile } from './tray-icons';
@@ -117,6 +117,7 @@ let meshPeers: { name: string; port: number; connected?: boolean; ip?: string; l
 let serverVersion: string | null = null;
 let meshPollTimer: ReturnType<typeof setInterval> | null = null;
 let forwardsWindow: BrowserWindow | null = null;
+let multiplexerWindow: BrowserWindow | null = null;
 let sleepBlockerId: number | null = null;
 // Relay reachability behind the tray badge: null until /api/status (or a relay
 // log line) says otherwise. relayDownSince anchors the grace window that keeps a
@@ -338,6 +339,22 @@ function showForwardsWindow(): void {
   forwardsWindow.on('closed', () => { forwardsWindow = null; });
 }
 
+function showMultiplexerWindow(): void {
+  if (!webUIUrl) return;
+  if (multiplexerWindow) { multiplexerWindow.focus(); return; }
+  multiplexerWindow = new BrowserWindow({
+    width: 420,
+    height: 460,
+    resizable: true,
+    center: true,
+    alwaysOnTop: true,
+    title: 'Terminal Multiplexer',
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+  multiplexerWindow.loadURL(`${webUIUrl}/multiplexer`);
+  multiplexerWindow.on('closed', () => { multiplexerWindow = null; });
+}
+
 /** Path to the plain template glyph — Windows/Linux, and the darwin fallback. */
 function templateIconPath(): string {
   return join(__dirname, '..', 'assets', 'trayTemplate.png');
@@ -496,6 +513,13 @@ function updateTray(): void {
         ],
       });
     }
+  }
+
+  // The multiplexer is a machine setting, so it is offered whenever the server
+  // is up — unlike port forwards, which only make sense with peers.
+  if (serverRunning) {
+    menuItems.push({ type: 'separator' });
+    menuItems.push({ label: 'Terminal Multiplexer…', click: () => showMultiplexerWindow() });
   }
 
   // --- Port forwards section (manages forwards across all peers) ---
@@ -668,6 +692,20 @@ function startServer(saveState = true): void {
     }
 
 
+    // herdr is fetched lazily the first time it is selected (~17MB), so surface
+    // progress — otherwise the first switch looks like a hang.
+    const muxEvent = parseMultiplexerLogEvent(line);
+    if (muxEvent === 'herdr-downloading') {
+      log('herdr not found — download triggered');
+      notify('Termcast', 'Downloading herdr...');
+    } else if (muxEvent === 'herdr-ready') {
+      log('herdr ready');
+      notify('Termcast', 'herdr downloaded and ready');
+    } else if (muxEvent === 'herdr-unavailable') {
+      log('herdr unavailable');
+      notify('Termcast', 'herdr could not be installed — keeping the current multiplexer.');
+    }
+
     if (line.includes('tmux not found — downloading')) {
       log('tmux not found — download triggered');
       notify('Termcast', 'Downloading tmux...');
@@ -723,6 +761,7 @@ function startServer(saveState = true): void {
     serverVersion = null;
     resetRelayState();
     forwardsWindow?.close();
+  multiplexerWindow?.close();
     updateTray();
 
     if (code !== 0 && code !== null) {
@@ -787,6 +826,7 @@ function stopServer(saveState = true): Promise<void> {
   serverVersion = null;
   resetRelayState();
   forwardsWindow?.close();
+  multiplexerWindow?.close();
   closeQRWindow();
   updateTray();
 
