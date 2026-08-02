@@ -57,7 +57,10 @@ export function sessionMetaFromTranscript(lines: string[]): SessionMeta {
       return;
     }
 
-    if (typeof entry.cwd === 'string' && entry.cwd) projectPath = entry.cwd;
+    // First cwd wins, not the last. cwd is recorded per entry and moves when the
+    // agent works in a subdirectory, so the last one describes wherever it
+    // happened to end up rather than the project the session belongs to.
+    if (!projectPath && typeof entry.cwd === 'string' && entry.cwd) projectPath = entry.cwd;
 
     const message = toMessage(entry, seq);
     if (!message) return;

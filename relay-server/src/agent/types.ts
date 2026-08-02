@@ -42,7 +42,12 @@ export interface AgentSessionSummary {
   projectPath: string;
   lastActiveAt: string | null;
   isLive: boolean;
-  messageCount: number;
+  /**
+   * Null when unknown. Listing reads only a slice of each transcript, so an
+   * exact count is not available until the session is opened — and an estimate
+   * derived from the slice would be worse than an honest absence.
+   */
+  messageCount: number | null;
   model: string | null;
   /** True when a permission request is waiting on an answer. */
   needsAttention: boolean;
