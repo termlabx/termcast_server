@@ -151,11 +151,21 @@ test('Bridge: notifyPhonesSelfEject sends 0x51 to phone sessions only', () => {
   bridge.stop();
 });
 
-test('localWsUrlFor: appends ?arg= for a phone, bare URL otherwise', () => {
-  assert.equal(localWsUrlFor('ws://127.0.0.1:7681/ws', null), 'ws://127.0.0.1:7681/ws');
+test('localWsUrlFor: a phone carries both its session and the multiplexer', () => {
   assert.equal(
-    localWsUrlFor('ws://127.0.0.1:7681/ws', 'P1-x'),
-    'ws://127.0.0.1:7681/ws?arg=P1-x',
+    localWsUrlFor('ws://127.0.0.1:7681/ws', 'phone-1', 'herdr'),
+    'ws://127.0.0.1:7681/ws?arg=phone-1&arg=herdr',
+  );
+});
+
+test('localWsUrlFor: no phone id means no args — the wrapper reads the sidecar', () => {
+  assert.equal(localWsUrlFor('ws://127.0.0.1:7681/ws', null, 'herdr'), 'ws://127.0.0.1:7681/ws');
+});
+
+test('localWsUrlFor: url-encodes a hostile phone id in both positions', () => {
+  assert.equal(
+    localWsUrlFor('ws://x/ws', 'a&arg=evil', 'tmux'),
+    'ws://x/ws?arg=a%26arg%3Devil&arg=tmux',
   );
 });
 

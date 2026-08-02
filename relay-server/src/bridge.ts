@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { RelayClient } from './relay-client.js';
 import * as crypto from './crypto.js';
 import { PortForwardHandler } from './port-forward.js';
+import type { Multiplexer } from './multiplexer.js';
 
 const MSG_HANDSHAKE = 0x01;
 const MSG_HANDSHAKE_ACK = 0x02;
@@ -50,9 +51,16 @@ const MESH_EVICT = 0x50;
 const MESH_RETRY = 0x52;
 const SELF_EJECT_NOTICE = 0x51;
 
-/** Local ttyd WS URL for a session: phones carry a per-phone tmux session arg. */
-export function localWsUrlFor(base: string, phoneId: string | null): string {
-  return phoneId ? `${base}?arg=${encodeURIComponent(phoneId)}` : base;
+/**
+ * Local ttyd WS URL for a session. Phones carry two url-args: their per-phone
+ * session id ($1) and the active multiplexer ($2). Non-phone connections carry
+ * neither, so the wrapper script falls back to the sidecar file.
+ */
+export function localWsUrlFor(base: string, phoneId: string | null, mux: Multiplexer | null): string {
+  if (!phoneId) return base;
+  const args = [`arg=${encodeURIComponent(phoneId)}`];
+  if (mux) args.push(`arg=${encodeURIComponent(mux)}`);
+  return `${base}?${args.join('&')}`;
 }
 
 interface ClientSession {
@@ -76,6 +84,9 @@ export class Bridge extends EventEmitter {
   private sessions = new Map<number, ClientSession>();
   private meshMembershipCheck: ((peerDeviceId: string) => boolean) | null = null;
   private meshActiveCheck: (() => boolean) | null = null;
+  // Read per connection, so a multiplexer switch applies to the next phone that
+  // connects without respawning ttyd or dropping anyone already attached.
+  private multiplexerProvider: (() => Multiplexer) | null = null;
 
   private clientConnectHandler: ((connId: number, payload: Buffer) => void) | null = null;
   private messageHandler: ((type: number, connId: number, payload: Buffer) => void) | null = null;
@@ -91,6 +102,11 @@ export class Bridge extends EventEmitter {
 
   get publicKey(): Buffer {
     return this.serverKeyPair.publicKey;
+  }
+
+  /** Registers the source of the machine's active multiplexer. */
+  setMultiplexerProvider(fn: () => Multiplexer): void {
+    this.multiplexerProvider = fn;
   }
 
   /** Registers the predicate that tells whether a peer is currently in our set. */
@@ -280,7 +296,8 @@ export class Bridge extends EventEmitter {
     if (!this.running) return;
     if (session.localWs) { try { session.localWs.close(); } catch {} session.localWs = null; }
 
-    const ws = new WebSocket(localWsUrlFor(this.localWsURL, session.phoneId), ['tty']);
+    const mux = this.multiplexerProvider ? this.multiplexerProvider() : null;
+    const ws = new WebSocket(localWsUrlFor(this.localWsURL, session.phoneId, mux), ['tty']);
     session.localWs = ws;
 
     ws.on('open', () => {

@@ -218,13 +218,15 @@ program
 
     // Flags beat the stored setting; a flag-driven choice is also persisted so
     // the sidecar (and therefore the browser view) agrees with what ttyd runs.
-    const activeMultiplexer = multiplexerFromConfig(loadServerConfig() ?? {}, opts);
-    setMultiplexerPersisted(activeMultiplexer);
+    // Process-local mirror of config.json's multiplexer. The bridge reads this
+    // per connection, so changing it takes effect without respawning ttyd.
+    let currentMultiplexer = multiplexerFromConfig(loadServerConfig() ?? {}, opts);
+    setMultiplexerPersisted(currentMultiplexer);
 
     const ttyd = new TtydManager({
       port: parseInt(opts.port),
       shell: opts.shell,
-      multiplexer: activeMultiplexer,
+      multiplexer: currentMultiplexer,
     });
     const webUI = new WebUI();
     webUI.setTtydPort(parseInt(opts.port));
@@ -280,7 +282,7 @@ program
         pairingSecret: currentPairing.pairingSecret,
         clusters: {},
         meshPairedAt: 0,
-        multiplexer: activeMultiplexer,
+        multiplexer: currentMultiplexer,
       });
     }
 
@@ -481,6 +483,9 @@ program
     // Inactive ⇒ permanent evict; active-but-unknown ⇒ retry (invite may be in
     // flight). This prevents the mutual-eviction deadlock during simultaneous
     // bidirectional mesh setup.
+    // Read live rather than captured, so a switch (from the web UI, the CLI, or
+    // a phone) reaches the very next connection.
+    bridge.setMultiplexerProvider(() => currentMultiplexer);
     bridge.setMeshActiveCheck(() => isMeshActive(meshPairedAt));
     bridge.setMeshMembershipCheck((peerDeviceId) =>
       savedPeers.some(p => p.deviceId === peerDeviceId));
