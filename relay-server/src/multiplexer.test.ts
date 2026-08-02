@@ -2,7 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseMultiplexer, sessionNameFor, killSessionCommand, multiplexerFromConfig,
+  killCommandsForPhone,
 } from './multiplexer.js';
+
+test('killCommandsForPhone: one teardown per real multiplexer, none for none', () => {
+  assert.deepEqual(killCommandsForPhone('p1'), [
+    "tmux kill-session -t 'tc_p1' 2>/dev/null",
+    "HERDR_SESSION='tch_p1' herdr server stop 2>/dev/null",
+  ]);
+});
+
+test('sessionNameFor: defaults to the tmux namespace when no multiplexer is given', () => {
+  assert.equal(sessionNameFor('1A2B-3C4D'), 'tc_1A2B_3C4D');
+});
 
 test('parseMultiplexer: defaults to tmux for anything unrecognised', () => {
   assert.equal(parseMultiplexer('herdr'), 'herdr');

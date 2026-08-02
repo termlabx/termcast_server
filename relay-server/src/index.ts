@@ -304,10 +304,15 @@ program
       if (cfg) saveServerConfig({ ...cfg, meshPairedAt });
     };
 
-    // Kill the OS tmux sessions for a set of session names (best-effort).
-    function killSessions(names: string[]): void {
-      for (const name of names) {
-        try { execSync(`tmux kill-session -t '${name.replace(/'/g, '')}' 2>/dev/null`); } catch {}
+    // Tear down every multiplexer's session for a set of phones (best-effort).
+    // A phone can hold one session per multiplexer — switching the setting
+    // deliberately leaves the other dormant rather than killing it — so expiry
+    // and leave must clear both namespaces.
+    function killPhoneSessions(phoneIds: string[]): void {
+      for (const id of phoneIds) {
+        for (const cmd of killCommandsForPhone(id)) {
+          try { execSync(cmd); } catch {}
+        }
       }
     }
 
@@ -543,7 +548,7 @@ program
     // Leave: drop every phone cluster, kill their tmux sessions, isolate mesh,
     // and best-effort notify connected phones.
     function leaveCluster(): { ok: true } {
-      killSessions(Object.values(clusters).map((c) => c.sessionName));
+      killPhoneSessions(Object.keys(clusters));
       clusters = {};
       persistClusters();
       // Durable ejection: survives restarts and is honoured over stale invites,
@@ -652,9 +657,9 @@ program
     // (2) isolate the server↔server mesh once its association window lapses.
     // These are now independent: the mesh no longer requires a phone cluster.
     const clusterSweepTimer = setInterval(() => {
-      const { kept, expired } = sweepExpiredClusters(clusters);
+      const { kept, expiredPhoneIds: expired } = sweepExpiredClusters(clusters);
       if (expired.length > 0) {
-        killSessions(expired);
+        killPhoneSessions(expired);
         clusters = kept;
         persistClusters();
         console.log(`Expired ${expired.length} cluster(s) past the 7-day cap.`);

@@ -25,7 +25,7 @@ export function sessionPrefix(mux: Multiplexer): string {
  * Session name for a phone under one multiplexer. MUST match the wrapper
  * script's computation in buildMultiplexerShellArgs().
  */
-export function sessionNameFor(phoneId: string, mux: Multiplexer): string {
+export function sessionNameFor(phoneId: string, mux: Multiplexer = 'tmux'): string {
   return sessionPrefix(mux) + phoneId.replace(/[^A-Za-z0-9_]/g, '_');
 }
 

@@ -41,15 +41,15 @@ test('upsertCluster: adds new, keeps the newer pairedAt on update', () => {
   assert.equal(m3.P1.pairedAt, now + 5000);
 });
 
-test('sweepExpiredClusters: partitions and returns expired session names', () => {
+test('sweepExpiredClusters: returns phone ids so every namespace can be torn down', () => {
   const now = 1_000_000_000_000;
   const map = {
     a: { pairedAt: now - SEVEN_DAYS_MS - 1, sessionName: 'tc_a' },
     b: { pairedAt: now, sessionName: 'tc_b' },
   };
-  const { kept, expired } = sweepExpiredClusters(map, now);
+  const { kept, expiredPhoneIds } = sweepExpiredClusters(map, now);
   assert.deepEqual(Object.keys(kept), ['b']);
-  assert.deepEqual(expired, ['tc_a']);
+  assert.deepEqual(expiredPhoneIds, ['a']);
 });
 
 // --- Mesh association anchor (phone-agnostic; decoupled from phone clusters) ---
