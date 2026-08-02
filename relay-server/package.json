@@ -29,23 +29,24 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "postinstall": "node scripts/postinstall.mjs",
-    "test": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/membership.test.ts src/ttyd-restart-policy.test.ts src/pairing.test.ts src/pairing-wrap.test.ts src/mesh-identity.test.ts src/relay-url.test.ts src/protocol-vectors.test.ts src/multiplexer.test.ts src/herdr-install.test.ts src/ttyd-manager.test.ts src/agent/claude-transcript.test.ts src/agent/claude-discovery.test.ts src/agent/frames.test.ts src/agent/opencode-client.test.ts src/agent/opencode-server.test.ts src/agent/claude-tail.test.ts src/agent/adapters.test.ts src/agent/registry.test.ts src/agent/attachments.test.ts && node --test scripts/download.test.mjs && npm run vectors:check",
+    "test": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/membership.test.ts src/ttyd-restart-policy.test.ts src/pairing.test.ts src/pairing-wrap.test.ts src/mesh-identity.test.ts src/relay-url.test.ts src/protocol-vectors.test.ts src/multiplexer.test.ts src/herdr-install.test.ts src/ttyd-manager.test.ts src/agent/claude-transcript.test.ts src/agent/claude-discovery.test.ts src/agent/frames.test.ts src/agent/opencode-client.test.ts src/agent/opencode-server.test.ts src/agent/claude-tail.test.ts src/agent/adapters.test.ts src/agent/registry.test.ts src/agent/attachments.test.ts src/agent/claude-sdk-session.test.ts && node --test scripts/download.test.mjs && npm run vectors:check",
     "vectors": "tsx scripts/generate-protocol-vectors.ts",
     "vectors:check": "tsx scripts/generate-protocol-vectors.ts --check",
     "test:integration": "tsx --test src/port-forward-integration.test.ts",
     "test:all": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/port-forward-integration.test.ts"
   },
   "dependencies": {
-    "ws": "^8.18.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "commander": "^13.1.0",
     "qrcode": "^1.5.4",
-    "commander": "^13.1.0"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "tsx": "^4.19.0",
-    "@types/ws": "^8.5.14",
+    "@types/node": "^24.0.0",
     "@types/qrcode": "^1.5.5",
-    "@types/node": "^24.0.0"
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
   },
   "author": "ulixlab",
   "repository": {
