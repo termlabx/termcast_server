@@ -39,6 +39,15 @@ import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardCh
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
 import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
+import { AgentRegistry } from './agent/registry.js';
+import { AttachmentManager } from './agent/attachments.js';
+import { ClaudeAdapter } from './agent/claude-adapter.js';
+import { OpencodeAdapter } from './agent/opencode-adapter.js';
+import { OpencodeClient } from './agent/opencode-client.js';
+import { OpencodeServer } from './agent/opencode-server.js';
+import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
+import type { AgentAdapter } from './agent/adapter.js';
+import type { AgentKind } from './agent/types.js';
 
 const program = new Command();
 
@@ -597,6 +606,46 @@ program
       installed: detectInstalledMultiplexers(),
     }));
 
+    // --- Agent sessions -----------------------------------------------------
+    // opencode is optional: if no server can be found or spawned, only Claude
+    // Code sessions are listed. A missing agent is never an error.
+    const opencodeServer = new OpencodeServer();
+    const opencodeUrl = await opencodeServer.start();
+    const agentAdapters: AgentAdapter[] = [new ClaudeAdapter()];
+    if (opencodeUrl) agentAdapters.push(new OpencodeAdapter(new OpencodeClient(opencodeUrl)));
+
+    const agentRegistry = new AgentRegistry(agentAdapters);
+    const attachments = new AttachmentManager(agentRegistry);
+
+    bridge.on('agent_list', async ({ connId }: { connId: number }) => {
+      const sessions = await agentRegistry.list();
+      bridge.sendAgentFrame(connId, AGENT_SESSIONS, { sessions });
+    });
+
+    bridge.on('agent_attach', async (req: { connId: number; agent: AgentKind; sessionId: string; sinceSeq: number }) => {
+      // Backfill first so the phone has context before live events arrive.
+      const page = await agentRegistry.history(req.agent, req.sessionId, null, 50);
+      bridge.sendAgentFrame(req.connId, AGENT_EVENT, {
+        kind: 'history', sessionId: req.sessionId, beforeSeq: null,
+        hasMore: page.hasMore, messages: page.messages,
+      });
+
+      await attachments.attach(req.connId, req.agent, req.sessionId, req.sinceSeq, (event) => {
+        bridge.sendAgentFrame(req.connId, AGENT_EVENT, event);
+      });
+    });
+
+    bridge.on('agent_history', async (req: { connId: number; agent: AgentKind; sessionId: string; beforeSeq: number | null; limit: number }) => {
+      const page = await agentRegistry.history(req.agent, req.sessionId, req.beforeSeq, Math.min(req.limit, 50));
+      bridge.sendAgentFrame(req.connId, AGENT_EVENT, {
+        kind: 'history', sessionId: req.sessionId, beforeSeq: req.beforeSeq,
+        hasMore: page.hasMore, messages: page.messages,
+      });
+    });
+
+    bridge.on('agent_detach', ({ connId }: { connId: number }) => attachments.detach(connId));
+    bridge.on('agent_detach_all', () => attachments.detachAll());
+
     // CLI-driven forward add/remove (POST /api/mesh/forwards).
     webUI.setMeshForwardHandler((raw: unknown) => {
       const change = raw as ForwardChange;
@@ -714,6 +763,8 @@ program
       shuttingDown = true;
       console.log('\nShutting down...');
       bridge.stop();
+      attachments.detachAll();
+      opencodeServer.stop();
       relay.disconnect();
       webUI.stop();
       clearInterval(clusterSweepTimer);

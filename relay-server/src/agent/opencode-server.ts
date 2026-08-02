@@ -39,19 +39,24 @@ export class OpencodeServer {
     if (existing) { this.url = existing; return existing; }
 
     const port = 4097;
+    // `dead` short-circuits the readiness poll. Without it, the overwhelmingly
+    // common case — opencode simply not installed — would stall termcastd's
+    // startup for the full poll budget before giving up.
+    let dead = false;
     try {
       this.child = spawn('opencode', ['serve', '--port', String(port), '--hostname', '127.0.0.1'], {
         stdio: 'ignore',
         detached: false,
       });
-      this.child.on('error', () => { this.child = null; });
+      this.child.on('error', () => { dead = true; this.child = null; });
+      this.child.on('exit', () => { dead = true; });
     } catch {
       return null;
     }
 
     const candidate = `http://127.0.0.1:${port}`;
     const client = new OpencodeClient(candidate);
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 20 && !dead; i++) {
       await new Promise((r) => setTimeout(r, 250));
       if (await client.health()) { this.url = candidate; return candidate; }
     }
