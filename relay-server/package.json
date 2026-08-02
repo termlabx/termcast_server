@@ -29,7 +29,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "postinstall": "node scripts/postinstall.mjs",
-    "test": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/membership.test.ts src/ttyd-restart-policy.test.ts src/pairing.test.ts src/pairing-wrap.test.ts src/mesh-identity.test.ts src/relay-url.test.ts src/protocol-vectors.test.ts src/multiplexer.test.ts src/herdr-install.test.ts src/ttyd-manager.test.ts src/agent/claude-transcript.test.ts src/agent/claude-discovery.test.ts && node --test scripts/download.test.mjs && npm run vectors:check",
+    "test": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/membership.test.ts src/ttyd-restart-policy.test.ts src/pairing.test.ts src/pairing-wrap.test.ts src/mesh-identity.test.ts src/relay-url.test.ts src/protocol-vectors.test.ts src/multiplexer.test.ts src/herdr-install.test.ts src/ttyd-manager.test.ts src/agent/claude-transcript.test.ts src/agent/claude-discovery.test.ts src/agent/frames.test.ts && node --test scripts/download.test.mjs && npm run vectors:check",
     "vectors": "tsx scripts/generate-protocol-vectors.ts",
     "vectors:check": "tsx scripts/generate-protocol-vectors.ts --check",
     "test:integration": "tsx --test src/port-forward-integration.test.ts",
