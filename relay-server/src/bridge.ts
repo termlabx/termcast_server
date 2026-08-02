@@ -4,6 +4,11 @@ import { RelayClient } from './relay-client.js';
 import * as crypto from './crypto.js';
 import { PortForwardHandler } from './port-forward.js';
 import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
+import {
+  AGENT_LIST, AGENT_ATTACH, AGENT_DETACH, AGENT_HISTORY,
+  AGENT_SEND, AGENT_INTERRUPT, AGENT_PERMISSION,
+  decodeAgentFrame, encodeAgentFrame, isAgentOpcode,
+} from './agent/frames.js';
 
 const MSG_HANDSHAKE = 0x01;
 const MSG_HANDSHAKE_ACK = 0x02;
@@ -52,6 +57,8 @@ const MESH_RETRY = 0x52;
 const SELF_EJECT_NOTICE = 0x51;
 const SET_MULTIPLEXER = 0x53;   // phone → server: change the machine setting
 const MULTIPLEXER_STATE = 0x54; // server → phone: active + what is installed
+
+const AGENT_KINDS = ['claude', 'opencode'] as const;
 
 /**
  * Local ttyd WS URL for a session. Phones carry two url-args: their per-phone
@@ -198,6 +205,9 @@ export class Bridge extends EventEmitter {
 
   private teardownAllSessions(): void {
     for (const connId of [...this.sessions.keys()]) this.teardownSession(connId);
+    // Release every agent subscription in one go: leaking a tail poller per
+    // reconnect is the same class of leak that drained battery through ttyd.
+    this.emit('agent_detach_all');
   }
 
   private createSession(connId: number, _metaPayload: Buffer): void {
@@ -229,6 +239,8 @@ export class Bridge extends EventEmitter {
         } catch {
           // A malformed frame is dropped; the setting is left alone.
         }
+      } else if (firstByte !== undefined && isAgentOpcode(firstByte)) {
+        this.handleAgentFrame(session.connId, decrypted);
       } else if (firstByte !== undefined && firstByte >= 0x40 && firstByte <= 0x43) {
         if (session.portForward && decrypted.length >= 5) {
           session.portForward.handleMessage(firstByte, decrypted.readUInt32BE(1), decrypted.subarray(5));
@@ -248,6 +260,90 @@ export class Bridge extends EventEmitter {
       session.pendingLocalFrames.push(frame);
     } else {
       console.error(`[bridge] connId ${session.connId}: localWs not OPEN — dropping terminal frame`);
+    }
+  }
+
+  /**
+   * Agent control frames. Every malformed or unrecognised payload is dropped
+   * silently: the phone re-requests, and a bad frame must never take down the
+   * data path shared with the terminal.
+   */
+  private handleAgentFrame(connId: number, decrypted: Buffer): void {
+    const frame = decodeAgentFrame(decrypted);
+    if (!frame) return;
+    const payload = (frame.payload ?? {}) as Record<string, unknown>;
+
+    switch (frame.opcode) {
+      case AGENT_LIST:
+        this.emit('agent_list', { connId });
+        return;
+
+      case AGENT_ATTACH: {
+        const target = this.readTarget(payload);
+        if (!target) return;
+        const sinceSeq = typeof payload.sinceSeq === 'number' ? payload.sinceSeq : -1;
+        this.emit('agent_attach', { connId, ...target, sinceSeq });
+        return;
+      }
+
+      case AGENT_DETACH:
+        this.emit('agent_detach', { connId });
+        return;
+
+      case AGENT_HISTORY: {
+        const target = this.readTarget(payload);
+        if (!target) return;
+        const beforeSeq = typeof payload.beforeSeq === 'number' ? payload.beforeSeq : null;
+        const limit = typeof payload.limit === 'number' ? payload.limit : 50;
+        this.emit('agent_history', { connId, ...target, beforeSeq, limit });
+        return;
+      }
+
+      case AGENT_SEND: {
+        const target = this.readTarget(payload);
+        if (!target || typeof payload.text !== 'string') return;
+        this.emit('agent_send', { connId, ...target, text: payload.text });
+        return;
+      }
+
+      case AGENT_INTERRUPT: {
+        const target = this.readTarget(payload);
+        if (!target) return;
+        this.emit('agent_interrupt', { connId, ...target });
+        return;
+      }
+
+      case AGENT_PERMISSION: {
+        const { requestId, behavior } = payload;
+        // Strict membership: a typo must be ignored, never coerced into "allow".
+        if (typeof requestId !== 'string') return;
+        if (behavior !== 'allow' && behavior !== 'deny') return;
+        this.emit('agent_permission', { connId, requestId, behavior });
+        return;
+      }
+
+      default:
+        return;
+    }
+  }
+
+  /** Validates the (agent, sessionId) pair every session-scoped frame carries. */
+  private readTarget(payload: Record<string, unknown>): { agent: string; sessionId: string } | null {
+    const { agent, sessionId } = payload;
+    if (typeof sessionId !== 'string' || !sessionId) return null;
+    if (!AGENT_KINDS.includes(agent as (typeof AGENT_KINDS)[number])) return null;
+    return { agent: agent as string, sessionId };
+  }
+
+  /** Encrypt and push an agent frame to one phone. */
+  sendAgentFrame(connId: number, opcode: number, payload: unknown): void {
+    const session = this.sessions.get(connId);
+    const key = session?.key;
+    if (!key) return;
+    try {
+      this.relay.send(MSG_DATA, connId, crypto.encrypt(encodeAgentFrame(opcode, payload), key));
+    } catch (err) {
+      console.error('[bridge] agent frame send failed:', (err as Error).message);
     }
   }
 
@@ -422,6 +518,7 @@ export class Bridge extends EventEmitter {
     session.key = null;
     session.pendingLocalFrames = [];
     session.outFrames = [];
+    this.emit('agent_detach', { connId });
     this.emit('client_disconnected', connId);
   }
 

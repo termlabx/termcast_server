@@ -320,3 +320,130 @@ test('MULTIPLEXER_STATE: broadcast reaches phone sessions with active + installe
   });
   bridge.stop();
 });
+
+// --- Agent control frames (0x60-0x68) ---------------------------------------
+//
+// The bridge stays transport-only: it decodes an agent frame, emits it, and
+// never learns what an agent session is. Anything malformed is dropped so a
+// bad control frame can never disturb the terminal data path sharing the socket.
+
+/**
+ * A started bridge with one handshaken phone on connId 1.
+ *
+ * `forwardedToTtyd()` reads the session's pending local frames: the local ttyd
+ * socket is still CONNECTING against a dead port, so anything the bridge means
+ * for ttyd lands there rather than being lost.
+ */
+function makeBridgeWithSession() {
+  const serverKP = crypto.generateKeyPair();
+  const relay = new FakeRelay();
+  const bridge = new Bridge('ws://127.0.0.1:1', relay as any, serverKP);
+  bridge.start();
+  bridge.setMeshMembershipCheck(() => true);
+  const phone = phoneSession(bridge, relay, serverKP, 1);
+
+  return {
+    bridge,
+    relay,
+    phone,
+    sendInner: (inner: Buffer) => relay.emit('message', MSG_DATA, 1, crypto.encrypt(inner, phone.symKey)),
+    forwardedToTtyd: (): Buffer[] => (bridge as any).sessions.get(1)?.pendingLocalFrames ?? [],
+  };
+}
+
+test('AGENT_LIST: a well-formed frame emits agent_list once', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  let calls = 0;
+  bridge.on('agent_list', () => { calls += 1; });
+
+  sendInner(Buffer.concat([Buffer.from([0x60]), Buffer.from('{}')]));
+
+  assert.equal(calls, 1);
+  bridge.stop();
+});
+
+test('AGENT_ATTACH: emits the requested session and seq', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  const seen: unknown[] = [];
+  bridge.on('agent_attach', (payload: unknown) => seen.push(payload));
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x62]),
+    Buffer.from(JSON.stringify({ agent: 'claude', sessionId: 's1', sinceSeq: 7 })),
+  ]));
+
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], { connId: 1, agent: 'claude', sessionId: 's1', sinceSeq: 7 });
+  bridge.stop();
+});
+
+test('AGENT_ATTACH: a malformed payload is dropped without throwing or emitting', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  let calls = 0;
+  bridge.on('agent_attach', () => { calls += 1; });
+
+  assert.doesNotThrow(() => sendInner(Buffer.concat([Buffer.from([0x62]), Buffer.from('{not json')])));
+  assert.equal(calls, 0);
+  bridge.stop();
+});
+
+test('AGENT_ATTACH: an unknown agent name is ignored rather than defaulted', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  let calls = 0;
+  bridge.on('agent_attach', () => { calls += 1; });
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x62]),
+    Buffer.from(JSON.stringify({ agent: 'gemini', sessionId: 's1', sinceSeq: 0 })),
+  ]));
+
+  assert.equal(calls, 0);
+  bridge.stop();
+});
+
+test('AGENT_PERMISSION: a behavior outside allow/deny is ignored, never coerced', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  let calls = 0;
+  bridge.on('agent_permission', () => { calls += 1; });
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x65]),
+    Buffer.from(JSON.stringify({ requestId: 'r1', behavior: 'ALLOW' })),
+  ]));
+
+  assert.equal(calls, 0);
+  bridge.stop();
+});
+
+test('agent opcodes never reach ttyd', () => {
+  const { bridge, sendInner, forwardedToTtyd } = makeBridgeWithSession();
+
+  sendInner(Buffer.concat([Buffer.from([0x60]), Buffer.from('{}')]));
+
+  assert.equal(forwardedToTtyd().length, 0);
+  bridge.stop();
+});
+
+test('a ttyd data frame is still forwarded untouched', () => {
+  const { bridge, sendInner, forwardedToTtyd } = makeBridgeWithSession();
+  const payload = Buffer.from('0hello');
+
+  sendInner(payload);
+
+  assert.deepEqual(forwardedToTtyd(), [payload]);
+  bridge.stop();
+});
+
+test('sendAgentFrame: encrypts an agent frame to one phone', () => {
+  const { bridge, relay, phone } = makeBridgeWithSession();
+
+  relay.sent.length = 0;
+  bridge.sendAgentFrame(1, 0x61, { sessions: [] });
+
+  const datas = relay.sent.filter(m => m.type === MSG_DATA);
+  assert.equal(datas.length, 1);
+  const inner = crypto.decrypt(datas[0].payload, phone.symKey);
+  assert.equal(inner[0], 0x61);
+  assert.deepEqual(JSON.parse(inner.subarray(1).toString()), { sessions: [] });
+  bridge.stop();
+});
