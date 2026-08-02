@@ -46,6 +46,7 @@ import { OpencodeAdapter } from './agent/opencode-adapter.js';
 import { OpencodeClient } from './agent/opencode-client.js';
 import { OpencodeServer } from './agent/opencode-server.js';
 import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
+import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
 import type { AgentAdapter } from './agent/adapter.js';
 import type { AgentKind } from './agent/types.js';
 
@@ -1273,6 +1274,39 @@ mux
       console.error(`\x1b[31m${name} install failed: ${(err as Error).message}\x1b[0m`);
       process.exit(1);
     }
+  });
+
+const agent = program.command('agent').description('Agent session chat controls');
+
+agent
+  .command('setup')
+  .description('Install Claude Code hooks so phones can approve tool calls')
+  .action(() => {
+    stageHookScripts();
+    installHooks(hookSettingsPath(), { hookDir: hookInstallDir() });
+    console.log('Installed. Claude Code sessions can now be approved from a paired phone.');
+    console.log('Sessions with no phone attached are unaffected. Undo with: termcast agent teardown');
+  });
+
+agent
+  .command('teardown')
+  .description('Remove the Claude Code hooks installed by setup')
+  .action(() => {
+    removeHooks(hookSettingsPath());
+    console.log('Removed. Tool approvals return to the terminal prompt.');
+  });
+
+agent
+  .command('status')
+  .description('Show whether phone approvals are enabled')
+  .action(() => {
+    let installed = false;
+    try {
+      installed = hooksInstalled(JSON.parse(readFileSync(hookSettingsPath(), 'utf8')));
+    } catch {
+      installed = false;
+    }
+    console.log(installed ? 'Phone approvals: enabled' : 'Phone approvals: not installed (run: termcast agent setup)');
   });
 
 program
