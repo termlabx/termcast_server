@@ -24,6 +24,8 @@ import { parseClientLogEvents, parseMultiplexerLogEvent } from './server-log-par
 import { forwardLabel, versionLabel, statusDot, clientLabel, clientDetailLines, clientDevice, isServerClient, peerDetailLines, trayTooltip, type ForwardState } from './tray-format';
 import { trayStatus, type TrayStatus } from './tray-status';
 import { trayIconFile } from './tray-icons';
+import { collectSessions } from './ai-metrics';
+import { aiMetricsHtml } from './ai-metrics-html';
 
 interface Settings {
   openAtLogin: boolean;
@@ -118,6 +120,8 @@ let serverVersion: string | null = null;
 let meshPollTimer: ReturnType<typeof setInterval> | null = null;
 let forwardsWindow: BrowserWindow | null = null;
 let multiplexerWindow: BrowserWindow | null = null;
+let aiMetricsWindow: BrowserWindow | null = null;
+let aiMetricsHtmlFile: string | null = null;
 let sleepBlockerId: number | null = null;
 // Relay reachability behind the tray badge: null until /api/status (or a relay
 // log line) says otherwise. relayDownSince anchors the grace window that keeps a
@@ -355,6 +359,58 @@ function showMultiplexerWindow(): void {
   multiplexerWindow.on('closed', () => { multiplexerWindow = null; });
 }
 
+/** Popup listing Claude Code / opencode sessions with topics and model traces.
+ *  Data is collected from ~/.claude and ~/.local/share/opencode on demand, so
+ *  the window opens instantly with a spinner and fills in when ready. */
+function showAiMetricsWindow(): void {
+  if (aiMetricsWindow) { aiMetricsWindow.focus(); return; }
+
+  aiMetricsWindow = new BrowserWindow({
+    width: 760,
+    height: 640,
+    resizable: true,
+    center: true,
+    alwaysOnTop: true,
+    title: 'AI Metrics',
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+
+  const loading = `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <style>
+    body { background:#1a1b26; color:#787c99; font-family:-apple-system,system-ui,sans-serif;
+      display:flex; align-items:center; justify-content:center; height:100vh; font-size:13px; }
+    </style></head><body>Scanning Claude Code / opencode sessions…</body></html>`;
+  aiMetricsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loading)}`);
+
+  collectSessions()
+    .then(sessions => {
+      const html = aiMetricsHtml(sessions);
+      const file = join(app.getPath('temp'), `ai-metrics-${Date.now()}.html`);
+      writeFileSync(file, html);
+      aiMetricsHtmlFile = file;
+      aiMetricsWindow?.loadFile(file);
+    })
+    .catch((err: unknown) => {
+      log('AI metrics collection failed', { error: err instanceof Error ? err.message : String(err) });
+      const failed = `<!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+        <style>
+        body { background:#1a1b26; color:#c0caf5; font-family:-apple-system,system-ui,sans-serif;
+          display:flex; align-items:center; justify-content:center; height:100vh; font-size:13px; }</style>
+        </head><body>Could not load AI metrics: ${encodeURIComponent(err instanceof Error ? err.message : String(err))}</body></html>`;
+      aiMetricsWindow?.loadURL(`data:text/html;charset=utf-8,${failed}`);
+    });
+
+  aiMetricsWindow.on('closed', () => {
+    if (aiMetricsHtmlFile) {
+      try { unlinkSync(aiMetricsHtmlFile); } catch { /* already gone */ }
+      aiMetricsHtmlFile = null;
+    }
+    aiMetricsWindow = null;
+  });
+}
+
 /** Path to the plain template glyph — Windows/Linux, and the darwin fallback. */
 function templateIconPath(): string {
   return join(__dirname, '..', 'assets', 'trayTemplate.png');
@@ -528,6 +584,11 @@ function updateTray(): void {
     menuItems.push({ label: 'Manage Port Forwards…', click: () => showForwardsWindow() });
     menuItems.push({ label: 'Leave cluster', click: () => leaveCluster() });
   }
+
+  // --- AI metrics (reads local Claude Code / opencode session data, so it is
+  // available whether or not the server is running) ---
+  menuItems.push({ type: 'separator' });
+  menuItems.push({ label: '📊  AI Metrics…', click: () => showAiMetricsWindow() });
 
   menuItems.push({ type: 'separator' });
   menuItems.push({
@@ -762,6 +823,7 @@ function startServer(saveState = true): void {
     resetRelayState();
     forwardsWindow?.close();
   multiplexerWindow?.close();
+  aiMetricsWindow?.close();
     updateTray();
 
     if (code !== 0 && code !== null) {
@@ -827,6 +889,7 @@ function stopServer(saveState = true): Promise<void> {
   resetRelayState();
   forwardsWindow?.close();
   multiplexerWindow?.close();
+  aiMetricsWindow?.close();
   closeQRWindow();
   updateTray();
 
