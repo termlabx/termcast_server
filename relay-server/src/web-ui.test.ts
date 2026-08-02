@@ -235,3 +235,56 @@ test('GET /api/pairing/consumed resolves true when notifyPairingConsumed fires',
   setTimeout(() => ui.notifyPairingConsumed(), 50);
   assert.deepEqual(await pending, { consumed: true });
 });
+
+async function startWebUi(deps: { isAttached: (sessionId: string) => boolean }) {
+  const ui = new WebUI();
+  const { PermissionBroker } = await import('./agent/permission-broker.js');
+  const broker = new PermissionBroker();
+  ui.setPermissionHandler({ broker, isAttached: deps.isAttached });
+  await ui.start(await freePort());
+  return {
+    url: `http://127.0.0.1:${ui.port}`,
+    broker,
+    stop: () => ui.stop(),
+  };
+}
+
+test('POST /api/agent/permission: no attached phone answers immediately with no decision', async () => {
+  const { url, stop } = await startWebUi({ isAttached: () => false });
+
+  const res = await fetch(`${url}/api/agent/permission`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 's1', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {});
+  await stop();
+});
+
+test('POST /api/agent/permission: an attached phone decision is returned', async () => {
+  const { url, broker, stop } = await startWebUi({ isAttached: () => true });
+  broker.onRequest((req) => broker.resolve(req.requestId, 'allow'));
+
+  const res = await fetch(`${url}/api/agent/permission`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 's1', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }),
+  });
+
+  assert.deepEqual(await res.json(), { behavior: 'allow' });
+  await stop();
+});
+
+test('POST /api/agent/permission: a malformed body yields no decision rather than an error', async () => {
+  const { url, stop } = await startWebUi({ isAttached: () => true });
+
+  const res = await fetch(`${url}/api/agent/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: 'not json',
+  });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {});
+  await stop();
+});

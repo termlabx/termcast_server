@@ -47,6 +47,7 @@ import { OpencodeClient } from './agent/opencode-client.js';
 import { OpencodeServer } from './agent/opencode-server.js';
 import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
 import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
+import { PermissionBroker } from './agent/permission-broker.js';
 import type { AgentAdapter } from './agent/adapter.js';
 import type { AgentKind } from './agent/types.js';
 
@@ -644,7 +645,6 @@ program
       });
     });
 
-    bridge.on('agent_detach', ({ connId }: { connId: number }) => attachments.detach(connId));
     bridge.on('agent_detach_all', () => attachments.detachAll());
 
     // SDK sessions have no transcript to tail, so their events are pushed to
@@ -671,6 +671,36 @@ program
 
     bridge.on('agent_interrupt', async (req: { connId: number; agent: AgentKind; sessionId: string }) => {
       await agentRegistry.adapterFor(req.agent)?.interrupt(req.sessionId).catch(() => {});
+    });
+
+    const permissionBroker = new PermissionBroker();
+
+    // Fan every pending permission out to the phones watching that session.
+    permissionBroker.onRequest((request) => {
+      for (const connId of attachments.connectionsFor(request.sessionId)) {
+        bridge.sendAgentFrame(connId, AGENT_EVENT, {
+          kind: 'permission', sessionId: request.sessionId, seq: -1, request,
+        });
+      }
+    });
+
+    bridge.on('agent_permission', async (req: { requestId: string; behavior: 'allow' | 'deny' }) => {
+      permissionBroker.resolve(req.requestId, req.behavior);
+      // SDK-driven sessions hold their own resolvers.
+      for (const adapter of agentAdapters) {
+        await adapter.respondPermission(req.requestId, req.behavior).catch(() => {});
+      }
+    });
+
+    // A pending approval must not outlive the phone that could answer it.
+    bridge.on('agent_detach', ({ connId }: { connId: number }) => {
+      attachments.detach(connId);
+      if (attachments.attachedSessions().length === 0) permissionBroker.releaseAll();
+    });
+
+    webUI.setPermissionHandler({
+      broker: permissionBroker,
+      isAttached: (id) => attachments.isAttached(id),
     });
 
     // CLI-driven forward add/remove (POST /api/mesh/forwards).
@@ -706,6 +736,10 @@ program
       }));
     };
     saveState();
+
+    // The agent permission hook needs the loopback web port to ask whether a
+    // phone wants to approve a tool call.
+    writeFileSync(join(stateDir, 'web-port'), `${webUI.port}\n`);
 
     // Expose a live snapshot for `termcast status` (served at GET /api/status).
     webUI.setStatusProvider((): StatusSnapshot => {

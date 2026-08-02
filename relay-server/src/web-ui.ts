@@ -2,6 +2,7 @@ import { createServer, Server } from 'node:http';
 import { createConnection } from 'node:net';
 import { PairingInfo, getQRCodeDataURL, getQRCodeText } from './pairing.js';
 import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
+import type { PermissionBroker } from './agent/permission-broker.js';
 
 export class WebUI {
   private server: Server | null = null;
@@ -63,6 +64,19 @@ export class WebUI {
     install: (name: string) => Promise<void>;
   }): void {
     this.multiplexerHandlers = h;
+  }
+
+  private permissionHandler: {
+    broker: PermissionBroker;
+    isAttached: (sessionId: string) => boolean;
+  } | null = null;
+
+  /** Backs POST /api/agent/permission (the Claude Code hook endpoint). */
+  setPermissionHandler(h: {
+    broker: PermissionBroker;
+    isAttached: (sessionId: string) => boolean;
+  }): void {
+    this.permissionHandler = h;
   }
 
   setPairing(pairing: PairingInfo): void {
@@ -299,6 +313,53 @@ export class WebUI {
         return;
       }
 
+      if (req.url === '/api/agent/permission' && req.method === 'POST') {
+        // The hook blocks on this call. Answering {} means "no decision", which
+        // makes Claude Code fall through to its own terminal prompt — the safe
+        // default for every path except an explicit tap on a phone.
+        if (!this.permissionHandler) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+        const body = await readBody(req);
+        let payload: Record<string, unknown>;
+        try {
+          payload = JSON.parse(body) as Record<string, unknown>;
+        } catch {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+
+        const sessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
+        if (!sessionId || !this.permissionHandler.isAttached(sessionId)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+
+        const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'tool';
+        const input = JSON.stringify(payload.tool_input ?? {});
+        const clamped = input.length > 2048;
+
+        const outcome = await this.permissionHandler.broker.request({
+          requestId: `${sessionId}:${payload.tool_use_id ?? Date.now()}`,
+          sessionId,
+          agent: 'claude',
+          toolName,
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : '',
+          summary: summarisePermission(toolName, payload.tool_input),
+          input: clamped ? input.slice(0, 2048) : input,
+          truncated: clamped,
+          createdAt: new Date().toISOString(),
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(outcome === 'unanswered' ? {} : { behavior: outcome }));
+        return;
+      }
+
       if (req.url === '/api/mesh') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(this.meshPeersProvider()));
@@ -390,6 +451,22 @@ load();loadPeers();setInterval(load,30000);setInterval(loadPeers,10000);
       socket.setTimeout(1000, () => { socket.destroy(); resolve(false); });
     });
   }
+}
+
+function readBody(req: import('node:http').IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => resolve(body));
+  });
+}
+
+function summarisePermission(toolName: string, input: unknown): string {
+  if (typeof input !== 'object' || input === null) return toolName;
+  const fields = input as Record<string, unknown>;
+  if (typeof fields.command === 'string') return fields.command.replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (typeof fields.file_path === 'string') return `${toolName} ${fields.file_path.split('/').pop()}`;
+  return toolName;
 }
 
 // Server-rendered picker for the machine-wide multiplexer. Opened in a small
