@@ -100,6 +100,58 @@ export function stripNestingEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+/**
+ * Where an already-present binary might live, in the order start() prefers:
+ * bundled with the app, previously downloaded, then system PATH. Download-free,
+ * so the settings UI can report installed state without side effects. MUST stay
+ * in step with findOrInstallTmux()/findOrInstallHerdr() or the UI will claim
+ * something is missing that the wrapper script happily execs.
+ */
+export function resolveMultiplexerBinary(mux: 'tmux' | 'herdr'): string | null {
+  const names = mux === 'tmux'
+    ? [`tmux-${process.platform}-${process.arch}`, 'tmux']
+    : ['herdr'];
+  for (const name of names) {
+    for (const p of [
+      join(__dirname, '..', 'bin', name),
+      join(__dirname, '..', '..', 'bin', name),
+      join(homedir(), '.termcast', 'bin', name),
+    ]) {
+      if (existsSync(p)) return p;
+    }
+  }
+  try {
+    const systemPath = execSync(`which ${mux}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (systemPath) return systemPath;
+  } catch {}
+  return null;
+}
+
+/**
+ * Fetch the tmux binary for this platform into ~/.termcast/bin. Used by the
+ * explicit "Install" action in the settings UI and CLI; start() has its own
+ * lazy path. Throws on failure — the caller reports it and keeps the current
+ * multiplexer.
+ */
+export async function downloadTmux(): Promise<string> {
+  const binaryName = `tmux-${process.platform}-${process.arch}`;
+  const downloadDir = join(homedir(), '.termcast', 'bin');
+  const destPath = join(downloadDir, binaryName);
+  const resp = await fetch(releaseUrl(resolveBaseUrl(), binaryName));
+  if (!resp.ok) throw new Error(`tmux download failed: HTTP ${resp.status}`);
+  mkdirSync(downloadDir, { recursive: true });
+  writeFileSync(destPath, Buffer.from(await resp.arrayBuffer()), { mode: 0o755 });
+  return destPath;
+}
+
+/** What the settings page and `termcast multiplexer` report as installed. */
+export function detectInstalledMultiplexers(): { tmux: boolean; herdr: boolean } {
+  return {
+    tmux: resolveMultiplexerBinary('tmux') !== null,
+    herdr: resolveMultiplexerBinary('herdr') !== null,
+  };
+}
+
 export class TtydManager extends EventEmitter {
   private process: ChildProcess | null = null;
   private orphanPid: number | null = null;

@@ -1,6 +1,7 @@
 import { createServer, Server } from 'node:http';
 import { createConnection } from 'node:net';
 import { PairingInfo, getQRCodeDataURL, getQRCodeText } from './pairing.js';
+import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
 
 export class WebUI {
   private server: Server | null = null;
@@ -47,6 +48,21 @@ export class WebUI {
   /** Handles POST /api/leave (self-eject), wired by index.ts. */
   setLeaveHandler(fn: () => unknown): void {
     this.leaveHandler = fn;
+  }
+
+  private multiplexerHandlers: {
+    get: () => { active: Multiplexer; installed: { tmux: boolean; herdr: boolean } };
+    set: (mux: Multiplexer) => void;
+    install: (name: string) => Promise<void>;
+  } | null = null;
+
+  /** Backs GET/POST /api/multiplexer and /api/multiplexer/install, wired by index.ts. */
+  setMultiplexerHandlers(h: {
+    get: () => { active: Multiplexer; installed: { tmux: boolean; herdr: boolean } };
+    set: (mux: Multiplexer) => void;
+    install: (name: string) => Promise<void>;
+  }): void {
+    this.multiplexerHandlers = h;
   }
 
   setPairing(pairing: PairingInfo): void {
@@ -185,6 +201,104 @@ export class WebUI {
         return;
       }
 
+      if (req.url === '/api/multiplexer' && req.method === 'GET') {
+        if (!this.multiplexerHandlers) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'multiplexer unavailable' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(this.multiplexerHandlers.get()));
+        return;
+      }
+
+      if (req.url === '/api/multiplexer' && req.method === 'POST') {
+        // Same CSRF guard as /api/mesh/forwards: this mutates a machine setting.
+        const origin = req.headers.origin;
+        if (origin && !this.isAllowedOrigin(origin)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'cross-origin request blocked' }));
+          return;
+        }
+        if (!this.multiplexerHandlers) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'multiplexer unavailable' }));
+          return;
+        }
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          let name: unknown;
+          try {
+            name = (JSON.parse(body) as { multiplexer?: unknown }).multiplexer;
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+            return;
+          }
+          // Strict membership, not parseMultiplexer's lenient default: a typo
+          // must be rejected, never silently applied as tmux.
+          if (!MULTIPLEXERS.includes(name as Multiplexer)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'unknown multiplexer' }));
+            return;
+          }
+          this.multiplexerHandlers!.set(name as Multiplexer);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      }
+
+      if (req.url === '/api/multiplexer/install' && req.method === 'POST') {
+        const origin = req.headers.origin;
+        if (origin && !this.isAllowedOrigin(origin)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'cross-origin request blocked' }));
+          return;
+        }
+        if (!this.multiplexerHandlers) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'multiplexer unavailable' }));
+          return;
+        }
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', async () => {
+          let name: unknown;
+          try {
+            name = (JSON.parse(body) as { name?: unknown }).name;
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+            return;
+          }
+          // 'none' has no binary to install.
+          if (name !== 'tmux' && name !== 'herdr') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'unknown multiplexer' }));
+            return;
+          }
+          try {
+            await this.multiplexerHandlers!.install(name);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (err) {
+            // Install failure is never fatal — report it and leave the current
+            // multiplexer in place.
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+          }
+        });
+        return;
+      }
+
+      if (req.url === '/multiplexer') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(MULTIPLEXER_PAGE);
+        return;
+      }
+
       if (req.url === '/api/mesh') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(this.meshPeersProvider()));
@@ -277,6 +391,80 @@ load();loadPeers();setInterval(load,30000);setInterval(loadPeers,10000);
     });
   }
 }
+
+// Server-rendered picker for the machine-wide multiplexer. Opened in a small
+// BrowserWindow by the desktop app's tray and reachable from any browser.
+// Switching is safe: each multiplexer owns a session namespace, so the other's
+// sessions are left dormant rather than destroyed.
+const MULTIPLEXER_PAGE = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Terminal Multiplexer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui;background:#1a1b26;color:#c0caf5;margin:0;padding:1rem}
+h1{font-size:1.1rem;margin:0 0 .35rem}
+.sub{color:#787c99;font-size:.8rem;margin:0 0 1rem;line-height:1.4}
+.opt{display:flex;align-items:center;gap:.6rem;background:#24283b;border-radius:.75rem;padding:.8rem 1rem;margin-bottom:.6rem}
+.opt label{display:flex;align-items:center;gap:.6rem;flex:1;cursor:pointer}
+.opt .name{font-size:.95rem}
+.opt .state{color:#787c99;font-size:.78rem}
+.opt .state.ok{color:#9ece6a}
+.opt .state.missing{color:#e0af68}
+button{background:#414868;border:none;border-radius:.4rem;color:#c0caf5;padding:.35rem .7rem;font-size:.8rem;cursor:pointer}
+button:hover{background:#565f89}
+button:disabled{opacity:.5;cursor:default}
+.msg{font-size:.8rem;margin-top:.6rem;min-height:1rem}
+.msg.err{color:#f7768e}.msg.note{color:#9ece6a}
+</style></head>
+<body><h1>Terminal Multiplexer</h1>
+<p class="sub">A setting on this machine — it affects every device connected to it.
+Sessions belonging to the other multiplexer are kept, not destroyed.</p>
+<div id="opts"><p class="sub">Loading…</p></div>
+<div class="msg" id="msg"></div>
+<script>
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+const DESC={tmux:'Classic, widely available',herdr:'Workspace manager for AI coding agents',none:'Plain shell, no session persistence'};
+let busy=false;
+function say(t,cls){const m=document.getElementById('msg');m.textContent=t;m.className='msg '+(cls||'')}
+async function load(){
+  const r=await fetch('/api/multiplexer');
+  if(!r.ok){say('Multiplexer settings unavailable.','err');return}
+  const s=await r.json();
+  let h='';
+  for(const name of ['tmux','herdr','none']){
+    const inst=name==='none'?null:!!(s.installed||{})[name];
+    const checked=s.active===name?' checked':'';
+    // 'none' needs no binary; a missing one offers an Install button instead of
+    // letting the user select something the machine cannot run.
+    const state=inst===null?'':(inst?'<span class="state ok">installed</span>':'<span class="state missing">not installed</span>');
+    const dis=inst===false?' disabled':'';
+    const btn=inst===false?'<button onclick="install(\\''+esc(name)+'\\')">Install</button>':'';
+    h+='<div class="opt"><label><input type="radio" name="mux" value="'+esc(name)+'"'+checked+dis+
+       ' onchange="pick(this.value)"><span class="name">'+esc(name)+'</span>'+state+
+       '</label>'+btn+'</div><div class="sub" style="margin:-.35rem 0 .6rem 1rem">'+esc(DESC[name]||'')+'</div>';
+  }
+  document.getElementById('opts').innerHTML=h;
+}
+async function pick(name){
+  if(busy)return;busy=true;
+  const r=await fetch('/api/multiplexer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({multiplexer:name})});
+  const res=await r.json().catch(()=>({}));
+  busy=false;
+  if(r.ok){say('Now using '+name+'. New connections use it immediately.','note')}
+  else{say(res.error||'Could not change multiplexer.','err')}
+  load();
+}
+async function install(name){
+  if(busy)return;busy=true;
+  say('Installing '+name+'…','note');
+  const r=await fetch('/api/multiplexer/install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});
+  const res=await r.json().catch(()=>({}));
+  busy=false;
+  if(r.ok){say(name+' installed.','note')}else{say(res.error||'Install failed.','err')}
+  load();
+}
+load();
+</script></body></html>`;
 
 // Server-rendered management page for mesh port forwards. Opened in a small
 // BrowserWindow by the desktop app and reachable from any browser. Talks to

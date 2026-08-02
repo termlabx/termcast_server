@@ -62,6 +62,19 @@ export function killSessionCommand(name: string, mux: Multiplexer): string | nul
   return null;
 }
 
+/** Human-readable status block shared by `termcast multiplexer` and the logs. */
+export function describeMultiplexerStatus(
+  active: Multiplexer, installed: { tmux: boolean; herdr: boolean },
+): string {
+  return MULTIPLEXERS.map((m) => {
+    const mark = m === active ? '● ' : '  ';
+    // 'none' is the bare shell — there is no binary, so an install state would
+    // be meaningless.
+    const state = m === 'none' ? '' : installed[m] ? ' (installed)' : ' (not installed)';
+    return `${mark}${m}${state}${m === active ? ' — active' : ''}`;
+  }).join('\n');
+}
+
 /** Every teardown command for one phone, across all session namespaces. */
 export function killCommandsForPhone(phoneId: string): string[] {
   return MULTIPLEXERS

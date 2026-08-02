@@ -236,3 +236,87 @@ test('coalesceOutputFrames is a no-op for a single output frame', () => {
   const merged = coalesceOutputFrames([out('solo')]);
   assert.deepEqual(merged, [out('solo')]);
 });
+
+// --- Multiplexer control frames (0x53 / 0x54) -------------------------------
+//
+// The multiplexer is a machine-wide setting, so a phone changes it with an
+// explicit, auditable frame rather than a handshake field — a reconnecting
+// phone carrying a stale value must never silently flip the machine back.
+
+function phoneSession(bridge: Bridge, relay: FakeRelay, serverKP: ReturnType<typeof crypto.generateKeyPair>, connId: number) {
+  relay.emit('client_connect', connId, Buffer.alloc(0));
+  const phone = clientKeyFor(serverKP.publicKey);
+  relay.emit('message', MSG_HANDSHAKE, connId, handshake(phone.clientPub));
+  return phone;
+}
+
+test('SET_MULTIPLEXER: a valid name is accepted and emitted once', () => {
+  const serverKP = crypto.generateKeyPair();
+  const relay = new FakeRelay();
+  const bridge = new Bridge('ws://127.0.0.1:1', relay as any, serverKP);
+  bridge.start();
+  bridge.setMeshMembershipCheck(() => true);
+  const phone = phoneSession(bridge, relay, serverKP, 20);
+
+  const seen: string[] = [];
+  bridge.on('multiplexer_set', (m: string) => seen.push(m));
+  const inner = Buffer.concat([Buffer.from([0x53]), Buffer.from(JSON.stringify({ multiplexer: 'herdr' }))]);
+  relay.emit('message', MSG_DATA, 20, crypto.encrypt(inner, phone.symKey));
+
+  assert.deepEqual(seen, ['herdr']);
+  bridge.stop();
+});
+
+test('SET_MULTIPLEXER: an unknown name is ignored, not coerced to tmux', () => {
+  const serverKP = crypto.generateKeyPair();
+  const relay = new FakeRelay();
+  const bridge = new Bridge('ws://127.0.0.1:1', relay as any, serverKP);
+  bridge.start();
+  bridge.setMeshMembershipCheck(() => true);
+  const phone = phoneSession(bridge, relay, serverKP, 21);
+
+  const seen: string[] = [];
+  bridge.on('multiplexer_set', (m: string) => seen.push(m));
+  const inner = Buffer.concat([Buffer.from([0x53]), Buffer.from(JSON.stringify({ multiplexer: 'zellij' }))]);
+  relay.emit('message', MSG_DATA, 21, crypto.encrypt(inner, phone.symKey));
+
+  assert.deepEqual(seen, []);
+  bridge.stop();
+});
+
+test('SET_MULTIPLEXER: malformed JSON is dropped without throwing', () => {
+  const serverKP = crypto.generateKeyPair();
+  const relay = new FakeRelay();
+  const bridge = new Bridge('ws://127.0.0.1:1', relay as any, serverKP);
+  bridge.start();
+  bridge.setMeshMembershipCheck(() => true);
+  const phone = phoneSession(bridge, relay, serverKP, 22);
+
+  const inner = Buffer.concat([Buffer.from([0x53]), Buffer.from('not json')]);
+  assert.doesNotThrow(() => {
+    relay.emit('message', MSG_DATA, 22, crypto.encrypt(inner, phone.symKey));
+  });
+  bridge.stop();
+});
+
+test('MULTIPLEXER_STATE: broadcast reaches phone sessions with active + installed', () => {
+  const serverKP = crypto.generateKeyPair();
+  const relay = new FakeRelay();
+  const bridge = new Bridge('ws://127.0.0.1:1', relay as any, serverKP);
+  bridge.start();
+  bridge.setMeshMembershipCheck(() => true);
+  const phone = phoneSession(bridge, relay, serverKP, 23);
+
+  relay.sent.length = 0;
+  bridge.broadcastMultiplexerState('herdr', { tmux: true, herdr: true });
+
+  const datas = relay.sent.filter(m => m.type === MSG_DATA);
+  assert.equal(datas.length, 1);
+  const inner = crypto.decrypt(datas[0].payload, phone.symKey);
+  assert.equal(inner[0], 0x54);
+  assert.deepEqual(JSON.parse(inner.subarray(1).toString()), {
+    active: 'herdr',
+    installed: { tmux: true, herdr: true },
+  });
+  bridge.stop();
+});

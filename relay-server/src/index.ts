@@ -17,7 +17,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 import { Command } from 'commander';
-import { TtydManager } from './ttyd-manager.js';
+import { TtydManager, detectInstalledMultiplexers, downloadTmux } from './ttyd-manager.js';
+import { downloadHerdr } from './herdr-install.js';
 import { shouldRecoverFromTtydExit } from './ttyd-restart-policy.js';
 import { RelayClient } from './relay-client.js';
 import { Bridge } from './bridge.js';
@@ -36,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
-import { type Multiplexer, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone } from './multiplexer.js';
+import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
 
 const program = new Command();
@@ -562,6 +563,39 @@ program
     }
 
     webUI.setLeaveHandler(() => leaveCluster());
+
+    /**
+     * Apply a multiplexer change from any control surface (web UI, CLI, or a
+     * phone's SET_MULTIPLEXER frame). Persists it, mirrors it to the sidecar,
+     * and updates the in-process value the bridge hands to new connections —
+     * no respawn, so live connections are undisturbed and the next one uses it.
+     */
+    function setMultiplexer(mux: Multiplexer): void {
+      currentMultiplexer = mux;
+      setMultiplexerPersisted(mux);
+      bridge.broadcastMultiplexerState(mux, detectInstalledMultiplexers());
+      console.log(`Multiplexer set to ${mux}.`);
+    }
+
+    webUI.setMultiplexerHandlers({
+      get: () => ({ active: currentMultiplexer, installed: detectInstalledMultiplexers() }),
+      set: (mux) => setMultiplexer(mux),
+      install: async (name) => {
+        if (name === 'herdr') {
+          await downloadHerdr(join(homedir(), '.termcast', 'bin', 'herdr'));
+        } else {
+          await downloadTmux();
+        }
+      },
+    });
+
+    // A phone asking for a different multiplexer goes through exactly the same
+    // path as the web UI and the CLI.
+    bridge.on('multiplexer_set', (mux: Multiplexer) => setMultiplexer(mux));
+    bridge.setMultiplexerStateProvider(() => ({
+      active: currentMultiplexer,
+      installed: detectInstalledMultiplexers(),
+    }));
 
     // CLI-driven forward add/remove (POST /api/mesh/forwards).
     webUI.setMeshForwardHandler((raw: unknown) => {
@@ -1098,6 +1132,69 @@ mesh
         const status = live ? `  ${f.state === 'active' ? '\x1b[32mactive\x1b[0m' : f.state === 'error' ? `\x1b[31merror${f.message ? ': ' + f.message : ''}\x1b[0m` : '\x1b[2mpending\x1b[0m'}` : '';
         console.log(`  localhost:${f.localPort} → :${f.remotePort}${status}`);
       }
+    }
+  });
+
+const mux = program
+  .command('multiplexer')
+  .description('Show or change the terminal multiplexer (tmux, herdr, or none)');
+
+mux.action(() => {
+  const cfg = loadServerConfig();
+  console.log(describeMultiplexerStatus(cfg?.multiplexer ?? 'tmux', detectInstalledMultiplexers()));
+});
+
+mux
+  .command('set <name>')
+  .description('Set the multiplexer: tmux, herdr, or none')
+  .action(async (name: string) => {
+    // Strict membership so a typo is rejected rather than silently applied as
+    // tmux by parseMultiplexer's lenient default.
+    if (!MULTIPLEXERS.includes(name as Multiplexer)) {
+      console.error(`\x1b[31mUnknown multiplexer: ${name}\x1b[0m`);
+      console.error('  → Use one of: tmux, herdr, none');
+      process.exit(1);
+    }
+    // Prefer the running server so its in-memory value (used for each new
+    // connection's url-arg) updates too; otherwise persist for the next start.
+    const state = readRunningState();
+    if (state?.webPort) {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${state.webPort}/api/multiplexer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ multiplexer: name }),
+        });
+        if (resp.ok) {
+          console.log(`✓ Multiplexer set to ${name}. New connections use it immediately.`);
+          return;
+        }
+      } catch {
+        // Fall through to the offline path below.
+      }
+    }
+    setMultiplexerPersisted(name as Multiplexer);
+    console.log(`✓ Multiplexer set to ${name}.`);
+  });
+
+mux
+  .command('install <name>')
+  .description('Install a multiplexer binary: tmux or herdr')
+  .action(async (name: string) => {
+    if (name !== 'tmux' && name !== 'herdr') {
+      console.error(`\x1b[31mNothing to install for: ${name}\x1b[0m`);
+      console.error('  → Use one of: tmux, herdr');
+      process.exit(1);
+    }
+    try {
+      console.log(`Installing ${name} for ${process.platform}-${process.arch}...`);
+      const path = name === 'herdr'
+        ? (await downloadHerdr(join(homedir(), '.termcast', 'bin', 'herdr')), join(homedir(), '.termcast', 'bin', 'herdr'))
+        : await downloadTmux();
+      console.log(`✓ ${name} installed at ${path}`);
+    } catch (err) {
+      console.error(`\x1b[31m${name} install failed: ${(err as Error).message}\x1b[0m`);
+      process.exit(1);
     }
   });
 

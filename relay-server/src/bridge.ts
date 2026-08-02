@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { RelayClient } from './relay-client.js';
 import * as crypto from './crypto.js';
 import { PortForwardHandler } from './port-forward.js';
-import type { Multiplexer } from './multiplexer.js';
+import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
 
 const MSG_HANDSHAKE = 0x01;
 const MSG_HANDSHAKE_ACK = 0x02;
@@ -50,6 +50,8 @@ const INNER_MESH_INVITE = 0x09;
 const MESH_EVICT = 0x50;
 const MESH_RETRY = 0x52;
 const SELF_EJECT_NOTICE = 0x51;
+const SET_MULTIPLEXER = 0x53;   // phone → server: change the machine setting
+const MULTIPLEXER_STATE = 0x54; // server → phone: active + what is installed
 
 /**
  * Local ttyd WS URL for a session. Phones carry two url-args: their per-phone
@@ -140,6 +142,35 @@ export class Bridge extends EventEmitter {
     }
   }
 
+  private multiplexerStateProvider:
+    (() => { active: Multiplexer; installed: { tmux: boolean; herdr: boolean } }) | null = null;
+
+  /** Supplies the MULTIPLEXER_STATE sent to each phone right after handshake. */
+  setMultiplexerStateProvider(
+    fn: () => { active: Multiplexer; installed: { tmux: boolean; herdr: boolean } },
+  ): void {
+    this.multiplexerStateProvider = fn;
+  }
+
+  /**
+   * Push the machine's multiplexer state to every connected phone, so a change
+   * made from any surface re-renders their key bars without a reconnect.
+   */
+  broadcastMultiplexerState(active: Multiplexer, installed: { tmux: boolean; herdr: boolean }): void {
+    const inner = Buffer.concat([
+      Buffer.from([MULTIPLEXER_STATE]),
+      Buffer.from(JSON.stringify({ active, installed })),
+    ]);
+    for (const session of this.sessions.values()) {
+      if (!session.isPhone || !session.key) continue;
+      try {
+        this.relay.send(MSG_DATA, session.connId, crypto.encrypt(inner, session.key));
+      } catch (err) {
+        console.error('[bridge] multiplexer state send failed:', (err as Error).message);
+      }
+    }
+  }
+
   start(): void {
     this.running = true;
 
@@ -186,6 +217,17 @@ export class Bridge extends EventEmitter {
           this.emit('mesh_invite', JSON.parse(decrypted.subarray(1).toString()));
         } catch (err) {
           console.error('[bridge] MESH_INVITE parse error:', (err as Error).message);
+        }
+      } else if (firstByte === SET_MULTIPLEXER) {
+        try {
+          const { multiplexer } = JSON.parse(decrypted.subarray(1).toString()) as { multiplexer?: unknown };
+          // Strict membership, not parseMultiplexer's lenient default: a typo
+          // must be ignored, never silently applied as tmux.
+          if (MULTIPLEXERS.includes(multiplexer as Multiplexer)) {
+            this.emit('multiplexer_set', multiplexer as Multiplexer);
+          }
+        } catch {
+          // A malformed frame is dropped; the setting is left alone.
         }
       } else if (firstByte !== undefined && firstByte >= 0x40 && firstByte <= 0x43) {
         if (session.portForward && decrypted.length >= 5) {
@@ -266,6 +308,21 @@ export class Bridge extends EventEmitter {
 
       this.relay.send(MSG_HANDSHAKE_ACK, session.connId, Buffer.from(JSON.stringify({ status: 'ok' })));
       this.connectLocal(session);
+      // Tell a freshly connected phone which multiplexer this machine runs, so
+      // its key bar renders correctly from the first frame rather than after a
+      // change. Phones only — mesh peers have no key bar.
+      if (session.isPhone && session.key && this.multiplexerStateProvider) {
+        const { active, installed } = this.multiplexerStateProvider();
+        const inner = Buffer.concat([
+          Buffer.from([MULTIPLEXER_STATE]),
+          Buffer.from(JSON.stringify({ active, installed })),
+        ]);
+        try {
+          this.relay.send(MSG_DATA, session.connId, crypto.encrypt(inner, session.key));
+        } catch (err) {
+          console.error('[bridge] multiplexer state send failed:', (err as Error).message);
+        }
+      }
       this.emit('handshake_complete', session.connId, session.peerDeviceId);
     } catch (err) {
       console.error('[bridge] Handshake failed:', (err as Error).message);

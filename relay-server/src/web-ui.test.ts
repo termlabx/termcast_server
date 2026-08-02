@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as net from 'node:net';
 import { WebUI } from './web-ui.js';
+import type { Multiplexer } from './multiplexer.js';
 import { generatePairingInfo } from './pairing.js';
 
 function samplePairing() {
@@ -125,6 +126,103 @@ test('GET /api/pairing (no new) displays the current QR without minting or regis
   assert.ok(body.qr.startsWith('data:image/png;base64,'));
   assert.equal(regenerated, 0, 'plain poll must not mint a new token');
   assert.equal(registered, 0, 'plain poll must not register a grant');
+});
+
+async function uiWithMultiplexer(active: Multiplexer = 'tmux', installed = { tmux: true, herdr: false }) {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  const setCalls: string[] = [];
+  const installCalls: string[] = [];
+  ui.setMultiplexerHandlers({
+    get: () => ({ active, installed }),
+    set: (m) => { setCalls.push(m); },
+    install: async (n) => { installCalls.push(n); },
+  });
+  return { ui, setCalls, installCalls };
+}
+
+test('GET /api/multiplexer: reports the active one and what is installed', async () => {
+  const { ui } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`);
+  assert.equal(resp.status, 200);
+  assert.deepEqual(await resp.json(), { active: 'tmux', installed: { tmux: true, herdr: false } });
+});
+
+test('POST /api/multiplexer: accepts a known name and applies it', async () => {
+  const { ui, setCalls } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ multiplexer: 'herdr' }),
+  });
+  assert.equal(resp.status, 200);
+  assert.deepEqual(setCalls, ['herdr']);
+});
+
+// Strict membership, not parseMultiplexer's lenient default: a typo must 400,
+// never silently switch the machine to tmux.
+test('POST /api/multiplexer: rejects an unknown multiplexer name', async () => {
+  const { ui, setCalls } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ multiplexer: 'zellij' }),
+  });
+  assert.equal(resp.status, 400);
+  assert.deepEqual(setCalls, []);
+});
+
+test('POST /api/multiplexer: blocks cross-origin requests like the other mutating routes', async () => {
+  const { ui, setCalls } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+    body: JSON.stringify({ multiplexer: 'herdr' }),
+  });
+  assert.equal(resp.status, 403);
+  assert.deepEqual(setCalls, []);
+});
+
+test('POST /api/multiplexer/install: routes the requested binary to the installer', async () => {
+  const { ui, installCalls } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer/install`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'herdr' }),
+  });
+  assert.equal(resp.status, 200);
+  assert.deepEqual(installCalls, ['herdr']);
+});
+
+test('GET /api/multiplexer without handlers returns 503', async () => {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`);
+  assert.equal(resp.status, 503);
+});
+
+test('GET /multiplexer serves the multiplexer settings page', async () => {
+  const { ui } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/multiplexer`);
+  assert.equal(resp.status, 200);
+  assert.match(resp.headers.get('content-type') ?? '', /text\/html/);
+  const body = await resp.text();
+  assert.ok(body.includes('Terminal Multiplexer'));
+  assert.ok(body.includes('/api/multiplexer'));
 });
 
 test('GET /api/pairing/consumed resolves true when notifyPairingConsumed fires', async () => {

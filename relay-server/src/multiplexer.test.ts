@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseMultiplexer, sessionNameFor, killSessionCommand, multiplexerFromConfig,
-  killCommandsForPhone,
+  killCommandsForPhone, describeMultiplexerStatus,
 } from './multiplexer.js';
 
 test('killCommandsForPhone: one teardown per real multiplexer, none for none', () => {
@@ -73,4 +73,17 @@ test('multiplexerFromConfig: an explicit flag beats the stored config', () => {
 
 test('multiplexerFromConfig: --multiplexer wins over --no-tmux when both are given', () => {
   assert.equal(multiplexerFromConfig({}, { multiplexer: 'herdr', tmux: false }), 'herdr');
+});
+
+test('describeMultiplexerStatus: marks the active one and flags what is missing', () => {
+  const out = describeMultiplexerStatus('herdr', { tmux: true, herdr: false });
+  assert.match(out, /herdr.*active/);
+  assert.match(out, /not installed/);
+});
+
+test('describeMultiplexerStatus: none needs no binary, so it is never "not installed"', () => {
+  const lines = describeMultiplexerStatus('none', { tmux: false, herdr: false }).split('\n');
+  const noneLine = lines.find(l => l.includes('none'))!;
+  assert.doesNotMatch(noneLine, /installed/);
+  assert.match(noneLine, /active/);
 });
