@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
+import { type Multiplexer, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone } from './multiplexer.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
 
 const program = new Command();
@@ -61,6 +62,9 @@ interface ServerConfig {
   // so the mesh survives the phone being offline and old phones that don't send
   // `phone_id`. See membership.ts: >0 active-until+7d, 0 never, <0 ejected.
   meshPairedAt: number;
+  // Which multiplexer this machine runs: 'tmux' | 'herdr' | 'none'. Machine-wide
+  // and not secret. Legacy configs lack it and default to tmux.
+  multiplexer: Multiplexer;
 }
 
 const configDir = join(homedir(), '.ttyd-server');
@@ -112,11 +116,15 @@ function loadServerConfig(): ServerConfig | null {
       // Legacy configs lack this; 0 = never associated (mesh off until a QR show
       // or a mesh invite re-anchors it).
       meshPairedAt: typeof raw.meshPairedAt === 'number' ? raw.meshPairedAt : 0,
+      // Legacy configs lack this; anything unrecognised means tmux, so an
+      // upgrade behaves exactly as before.
+      multiplexer: parseMultiplexer(raw.multiplexer),
     };
     // Upgrade a legacy plaintext config to ciphertext on first run after update,
-    // and persist the freshly defaulted clusters / meshPairedAt fields.
+    // and persist the freshly defaulted clusters / meshPairedAt / multiplexer fields.
     if (!isEncrypted(raw.privateKey) || !isEncrypted(raw.pairingSecret)
-        || typeof raw.clusters !== 'object' || typeof raw.meshPairedAt !== 'number') {
+        || typeof raw.clusters !== 'object' || typeof raw.meshPairedAt !== 'number'
+        || typeof raw.multiplexer !== 'string') {
       saveServerConfig(cfg);
     }
     return cfg;
@@ -142,11 +150,40 @@ function saveServerConfig(config: ServerConfig): void {
     pairingSecret: encryptField(config.pairingSecret, key),
     clusters: config.clusters ?? {}, // not secret
     meshPairedAt: config.meshPairedAt ?? 0, // not secret
+    multiplexer: config.multiplexer ?? 'tmux', // not secret
   };
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
   try { chmodSync(configDir, 0o700); } catch {}
   writeFileSync(configFile, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
   try { chmodSync(configFile, 0o600); } catch {}
+}
+
+const multiplexerFile = join(configDir, 'multiplexer');
+
+/**
+ * Mirror the active multiplexer into a one-word file the ttyd wrapper script
+ * reads at connection time. The script runs under dash and cannot parse
+ * config.json, hence the sidecar. Writing via a temp file + rename keeps the
+ * read atomic, so a connection landing mid-write never sees a truncated value.
+ */
+function writeMultiplexerSidecar(mux: Multiplexer): void {
+  try {
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    const tmp = `${multiplexerFile}.tmp`;
+    writeFileSync(tmp, `${mux}\n`, { mode: 0o600 });
+    renameSync(tmp, multiplexerFile);
+  } catch {}
+}
+
+/**
+ * Persist a multiplexer change: config for durability, sidecar for the wrapper
+ * script. Works whether or not a server is running — a running one picks the
+ * change up on the next connection, with no respawn.
+ */
+function setMultiplexerPersisted(mux: Multiplexer): void {
+  const cfg = loadServerConfig();
+  if (cfg) saveServerConfig({ ...cfg, multiplexer: mux });
+  writeMultiplexerSidecar(mux);
 }
 
 /** Offline leave: drop all phone clusters and clear saved peers (next start). */
@@ -167,7 +204,8 @@ program
   .option('-p, --port <port>', 'Local termcastd port', '7681')
   .option('-w, --web-port <port>', 'Web UI port', '8080')
   .option('-s, --shell <shell>', 'Shell to use')
-  .option('--no-tmux', 'Disable auto tmux session')
+  .option('--multiplexer <name>', 'Terminal multiplexer: tmux, herdr, or none')
+  .option('--no-tmux', 'Disable the multiplexer (alias for --multiplexer none)')
   .action(async (opts) => {
     // Resolve the relay before anything else: there is no default, and failing
     // here must not leave a spawned termcastd behind.
@@ -178,10 +216,15 @@ program
     }
     const relayURL = resolvedRelay.url;
 
+    // Flags beat the stored setting; a flag-driven choice is also persisted so
+    // the sidecar (and therefore the browser view) agrees with what ttyd runs.
+    const activeMultiplexer = multiplexerFromConfig(loadServerConfig() ?? {}, opts);
+    setMultiplexerPersisted(activeMultiplexer);
+
     const ttyd = new TtydManager({
       port: parseInt(opts.port),
       shell: opts.shell,
-      multiplexer: opts.tmux === false ? 'none' : 'tmux',
+      multiplexer: activeMultiplexer,
     });
     const webUI = new WebUI();
     webUI.setTtydPort(parseInt(opts.port));
@@ -237,6 +280,7 @@ program
         pairingSecret: currentPairing.pairingSecret,
         clusters: {},
         meshPairedAt: 0,
+        multiplexer: activeMultiplexer,
       });
     }
 

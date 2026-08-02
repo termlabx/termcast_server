@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMultiplexer, sessionNameFor, killSessionCommand } from './multiplexer.js';
+import {
+  parseMultiplexer, sessionNameFor, killSessionCommand, multiplexerFromConfig,
+} from './multiplexer.js';
 
 test('parseMultiplexer: defaults to tmux for anything unrecognised', () => {
   assert.equal(parseMultiplexer('herdr'), 'herdr');
@@ -27,4 +29,21 @@ test('killSessionCommand: per-multiplexer teardown, nothing to kill for none', (
 
 test('killSessionCommand: strips quotes so a crafted phone id cannot break out', () => {
   assert.equal(killSessionCommand("a'; rm -rf ~; '", 'tmux'), "tmux kill-session -t 'a; rm -rf ~; ' 2>/dev/null");
+});
+
+test('multiplexerFromConfig: a legacy config with no field means tmux', () => {
+  assert.equal(multiplexerFromConfig({}), 'tmux');
+  assert.equal(multiplexerFromConfig({ multiplexer: 'herdr' }), 'herdr');
+});
+
+test('multiplexerFromConfig: --no-tmux maps to none', () => {
+  assert.equal(multiplexerFromConfig({}, { tmux: false }), 'none');
+});
+
+test('multiplexerFromConfig: an explicit flag beats the stored config', () => {
+  assert.equal(multiplexerFromConfig({ multiplexer: 'tmux' }, { multiplexer: 'herdr' }), 'herdr');
+});
+
+test('multiplexerFromConfig: --multiplexer wins over --no-tmux when both are given', () => {
+  assert.equal(multiplexerFromConfig({}, { multiplexer: 'herdr', tmux: false }), 'herdr');
 });

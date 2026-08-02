@@ -29,6 +29,19 @@ export function sessionNameFor(phoneId: string, mux: Multiplexer): string {
   return sessionPrefix(mux) + phoneId.replace(/[^A-Za-z0-9_]/g, '_');
 }
 
+/**
+ * Resolve the effective multiplexer from stored config plus CLI flags.
+ * Precedence: explicit --multiplexer > --no-tmux > stored config > tmux.
+ */
+export function multiplexerFromConfig(
+  config: { multiplexer?: unknown },
+  flags: { multiplexer?: unknown; tmux?: boolean } = {},
+): Multiplexer {
+  if (flags.multiplexer !== undefined) return parseMultiplexer(flags.multiplexer);
+  if (flags.tmux === false) return 'none';
+  return parseMultiplexer(config.multiplexer);
+}
+
 /** Shell command that tears down one session, or null when there is nothing to kill. */
 export function killSessionCommand(name: string, mux: Multiplexer): string | null {
   const safe = name.replace(/'/g, '');
