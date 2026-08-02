@@ -81,3 +81,34 @@ export function killCommandsForPhone(phoneId: string): string[] {
     .map((m) => killSessionCommand(sessionNameFor(phoneId, m), m))
     .filter((c): c is string => c !== null);
 }
+
+/** POSIX single-quote escaping: close, escaped quote, reopen. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Command that types `text` into a session and presses Enter, or null when the
+ * multiplexer has no injection mechanism.
+ *
+ * tmux needs `-l` so the payload is taken literally: without it, text
+ * containing key names like "Enter" or "C-c" would be interpreted as keys.
+ * The text and Enter are separate calls because `-l` suppresses key-name
+ * interpretation for everything in that call, including the Enter itself.
+ *
+ * herdr v0.7.5 has no `session send`; the verified form is `herdr agent prompt
+ * <target> <text>`, which submits a prompt to the agent in that session.
+ */
+export function sendKeysCommand(sessionName: string, text: string, mux: Multiplexer): string | null {
+  if (!text.trim()) return null;
+  const target = shellQuote(sessionName);
+  const body = shellQuote(text);
+
+  if (mux === 'tmux') {
+    return `tmux send-keys -t ${target} -l ${body} && tmux send-keys -t ${target} Enter`;
+  }
+  if (mux === 'herdr') {
+    return `herdr agent prompt ${target} ${body}`;
+  }
+  return null;
+}

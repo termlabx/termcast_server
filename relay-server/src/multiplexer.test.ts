@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseMultiplexer, sessionNameFor, killSessionCommand, multiplexerFromConfig,
-  killCommandsForPhone, describeMultiplexerStatus,
+  killCommandsForPhone, describeMultiplexerStatus, sendKeysCommand,
 } from './multiplexer.js';
 
 test('killCommandsForPhone: one teardown per real multiplexer, none for none', () => {
@@ -86,4 +86,34 @@ test('describeMultiplexerStatus: none needs no binary, so it is never "not insta
   const noneLine = lines.find(l => l.includes('none'))!;
   assert.doesNotMatch(noneLine, /installed/);
   assert.match(noneLine, /active/);
+});
+
+test('sendKeysCommand: tmux sends the literal text then Enter', () => {
+  const command = sendKeysCommand('tc_p1', 'hello world', 'tmux');
+
+  assert.equal(command, "tmux send-keys -t 'tc_p1' -l 'hello world' && tmux send-keys -t 'tc_p1' Enter");
+});
+
+test('sendKeysCommand: single quotes in the text cannot break out of the shell quoting', () => {
+  // A message containing a quote must never become shell syntax.
+  const command = sendKeysCommand('tc_p1', "it's fine", 'tmux');
+
+  assert.ok(command !== null);
+  assert.ok(!command.includes("'it's fine'"));
+  assert.ok(command.includes(`'it'\\''s fine'`));
+});
+
+test('sendKeysCommand: herdr addresses the session by name', () => {
+  const command = sendKeysCommand('tch_p1', 'hello', 'herdr');
+
+  assert.ok(command?.includes('tch_p1'));
+  assert.ok(command?.includes('hello'));
+});
+
+test('sendKeysCommand: none has no injection mechanism', () => {
+  assert.equal(sendKeysCommand('tc_p1', 'hello', 'none'), null);
+});
+
+test('sendKeysCommand: an empty message produces no command', () => {
+  assert.equal(sendKeysCommand('tc_p1', '   ', 'tmux'), null);
 });
