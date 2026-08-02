@@ -8,7 +8,7 @@ import {
 test('killCommandsForPhone: one teardown per real multiplexer, none for none', () => {
   assert.deepEqual(killCommandsForPhone('p1'), [
     "tmux kill-session -t 'tc_p1' 2>/dev/null",
-    "HERDR_SESSION='tch_p1' herdr server stop 2>/dev/null",
+    "herdr session stop 'tch_p1' >/dev/null 2>&1; herdr session delete 'tch_p1' >/dev/null 2>&1",
   ]);
 });
 
@@ -35,12 +35,27 @@ test('sessionNameFor: herdr uses a separate namespace so switching keeps both', 
 
 test('killSessionCommand: per-multiplexer teardown, nothing to kill for none', () => {
   assert.equal(killSessionCommand('tc_p', 'tmux'), "tmux kill-session -t 'tc_p' 2>/dev/null");
-  assert.equal(killSessionCommand('tch_p', 'herdr'), "HERDR_SESSION='tch_p' herdr server stop 2>/dev/null");
+  assert.equal(
+    killSessionCommand('tch_p', 'herdr'),
+    "herdr session stop 'tch_p' >/dev/null 2>&1; herdr session delete 'tch_p' >/dev/null 2>&1",
+  );
   assert.equal(killSessionCommand('x', 'none'), null);
+});
+
+// Regression guard. herdr v0.7.5 has no HERDR_SESSION env var, so the env-var
+// form resolves to the *default* socket: it would stop the user's own herdr
+// session and leave the expired one running. Only `session stop <name>` targets
+// by name. Verified against the real binary.
+test('killSessionCommand: herdr teardown addresses the session by name, never via env', () => {
+  const cmd = killSessionCommand('tch_p', 'herdr')!;
+  assert.doesNotMatch(cmd, /HERDR_SESSION/);
+  assert.match(cmd, /herdr session stop 'tch_p'/);
+  assert.match(cmd, /herdr session delete 'tch_p'/);
 });
 
 test('killSessionCommand: strips quotes so a crafted phone id cannot break out', () => {
   assert.equal(killSessionCommand("a'; rm -rf ~; '", 'tmux'), "tmux kill-session -t 'a; rm -rf ~; ' 2>/dev/null");
+  assert.doesNotMatch(killSessionCommand("a'; rm -rf ~; '", 'herdr')!, /rm -rf ~;'/);
 });
 
 test('multiplexerFromConfig: a legacy config with no field means tmux', () => {

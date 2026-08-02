@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMultiplexerShellArgs } from './ttyd-manager.js';
+import { buildMultiplexerShellArgs, stripNestingEnv } from './ttyd-manager.js';
 
 const base = {
   shell: '/bin/zsh',
@@ -56,4 +56,29 @@ test('buildMultiplexerShellArgs: no tmux and no herdr degrades to a bare shell',
   const script = buildMultiplexerShellArgs({ ...base, tmuxPath: null, herdrPath: null })[2];
   assert.doesNotMatch(script, /new-session/);
   assert.match(script, /exec '\/bin\/zsh'/);
+});
+
+// Starting the server from inside a multiplexer is normal. If its nesting
+// markers reach ttyd, every connection dies on spawn: herdr exits 1 with
+// "nested herdr is disabled by default" (verified against v0.7.5) and tmux
+// refuses to nest a new session.
+test('stripNestingEnv: drops every herdr and tmux nesting marker', () => {
+  const cleaned = stripNestingEnv({
+    HERDR_ENV: '1',
+    HERDR_PANE_ID: 'w6:p1',
+    HERDR_SOCKET_PATH: '/Users/u/.config/herdr/herdr.sock',
+    HERDR_TAB_ID: 'w6:t1',
+    HERDR_WORKSPACE_ID: 'w6',
+    HERDR_STARTUP_CWD: '/Users/u',
+    TMUX: '/tmp/tmux-501/default,123,0',
+    TMUX_PANE: '%3',
+  });
+  assert.deepEqual(cleaned, {});
+});
+
+test('stripNestingEnv: leaves unrelated variables untouched and does not mutate its input', () => {
+  const env = { PATH: '/usr/bin', HOME: '/Users/u', TERM: 'xterm-256color', HERDR_ENV: '1' };
+  const cleaned = stripNestingEnv(env);
+  assert.deepEqual(cleaned, { PATH: '/usr/bin', HOME: '/Users/u', TERM: 'xterm-256color' });
+  assert.equal(env.HERDR_ENV, '1', 'process.env must not be mutated');
 });

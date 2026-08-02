@@ -46,9 +46,19 @@ export function multiplexerFromConfig(
 export function killSessionCommand(name: string, mux: Multiplexer): string | null {
   const safe = name.replace(/'/g, '');
   if (mux === 'tmux') return `tmux kill-session -t '${safe}' 2>/dev/null`;
-  // herdr's CLI exposes only `session list` and `session attach`; teardown goes
-  // through the per-session server, selected by HERDR_SESSION.
-  if (mux === 'herdr') return `HERDR_SESSION='${safe}' herdr server stop 2>/dev/null`;
+  // herdr keeps one server per named session, each on its own socket under
+  // ~/.config/herdr/sessions/<name>/. `herdr session stop` is the only form that
+  // addresses a session by name: there is no HERDR_SESSION env var (the binary
+  // reads only HERDR_DEBUG_OSC_EVIDENCE, HERDR_ENV, HERDR_RENDER_ENCODING), so
+  // an env-var form would silently fall through to the *default* socket and stop
+  // the user's own herdr session while leaving ours running. Verified v0.7.5.
+  //
+  // `stop` halts the server but leaves the session listed as `stopped` with its
+  // directory intact; `delete` reclaims it. Expiry means gone, so we do both.
+  // Both are idempotent — a missing session reports a JSON error and exits 0.
+  if (mux === 'herdr') {
+    return `herdr session stop '${safe}' >/dev/null 2>&1; herdr session delete '${safe}' >/dev/null 2>&1`;
+  }
   return null;
 }
 

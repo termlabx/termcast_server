@@ -75,6 +75,31 @@ export function buildMultiplexerShellArgs(opts: {
   return [shell, '-c', script, 'termcast'];
 }
 
+/**
+ * Variables a multiplexer sets inside its own panes to mark "you are already
+ * inside me". Both multiplexers refuse to nest when they see these, so they
+ * MUST NOT reach the ttyd child.
+ *
+ * This bites whenever the server is started from inside a multiplexer — running
+ * `termcast start` from a herdr pane or a tmux window is entirely normal, and
+ * without this every connection dies on spawn: herdr exits 1 with "nested herdr
+ * is disabled by default", tmux with "sessions should be nested with care".
+ * The session we launch is a sibling of the caller's, never a child, so
+ * dropping these is always correct.
+ */
+export function stripNestingEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const key of Object.keys(out)) {
+    // herdr: HERDR_ENV, HERDR_PANE_ID, HERDR_SOCKET_PATH, HERDR_TAB_ID,
+    // HERDR_WORKSPACE_ID, HERDR_STARTUP_CWD (verified against v0.7.5).
+    // tmux: TMUX, TMUX_PANE.
+    if (key.startsWith('HERDR_') || key === 'TMUX' || key === 'TMUX_PANE') {
+      delete out[key];
+    }
+  }
+  return out;
+}
+
 export class TtydManager extends EventEmitter {
   private process: ChildProcess | null = null;
   private orphanPid: number | null = null;
@@ -212,7 +237,7 @@ export class TtydManager extends EventEmitter {
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
-        ...process.env,
+        ...stripNestingEnv(process.env),
         // Ensure UTF-8 locale so the shell and programs (e.g. Claude Code)
         // output full Unicode rather than ASCII-only fallback characters.
         LANG: process.env.LANG || 'en_US.UTF-8',
