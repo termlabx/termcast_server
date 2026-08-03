@@ -619,9 +619,17 @@ program
     const agentRegistry = new AgentRegistry(agentAdapters);
     const attachments = new AttachmentManager(agentRegistry);
 
+    const approvalsEnabled = (): boolean => {
+      try {
+        return hooksInstalled(JSON.parse(readFileSync(hookSettingsPath(), 'utf8')));
+      } catch {
+        return false;
+      }
+    };
+
     bridge.on('agent_list', async ({ connId }: { connId: number }) => {
       const sessions = await agentRegistry.list();
-      bridge.sendAgentFrame(connId, AGENT_SESSIONS, { sessions });
+      bridge.sendAgentFrame(connId, AGENT_SESSIONS, { sessions, approvalsEnabled: approvalsEnabled() });
     });
 
     bridge.on('agent_attach', async (req: { connId: number; agent: AgentKind; sessionId: string; sinceSeq: number }) => {
