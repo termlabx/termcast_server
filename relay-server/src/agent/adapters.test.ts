@@ -89,7 +89,7 @@ test('ClaudeAdapter.send: a known idle session starts an SDK session and accepts
   const started: string[] = [];
   adapter.setSessionFactory((sessionId) => {
     started.push(sessionId);
-    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
 
   await adapter.send('s1', 'hello');
@@ -103,7 +103,7 @@ test('ClaudeAdapter.send: a second message reuses the same SDK session', async (
   let created = 0;
   adapter.setSessionFactory(() => {
     created += 1;
-    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
 
   await adapter.send('s1', 'one');
@@ -123,7 +123,7 @@ test('ClaudeAdapter.send: a live session injects into its pane instead of starti
   adapter.setInjector(async (paneId, text) => { injected.push(`${paneId}:${text}`); return true; });
   adapter.setSessionFactory(() => {
     sdkStarted = true;
-    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
 
   await adapter.send('s1', 'hello');
@@ -149,7 +149,7 @@ test('ClaudeAdapter.send: a live session ends the turn once its pane is idle aga
   adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
   adapter.setInjector(async () => { idleSamples += 1; return true; });
   adapter.setSessionFactory(() => {
-    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
 
   await adapter.send('s1', 'hello');
@@ -191,7 +191,7 @@ test('ClaudeAdapter.send: a live session with no pane falls back to the SDK', as
   adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: null }]);
   adapter.setSessionFactory(() => {
     sdkStarted = true;
-    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false };
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
 
   await adapter.send('s1', 'hello');

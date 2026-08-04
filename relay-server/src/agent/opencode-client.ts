@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AgentMessage, AgentSessionSummary, AgentQuestionOption, MessageBlock, MessageRole } from './types.js';
+import type { AgentMessage, AgentSessionSummary, AgentQuestionInfo, MessageBlock, MessageRole } from './types.js';
 
 const MAX_BLOCK_CHARS = 2048;
 const REQUEST_TIMEOUT_MS = 5000;
@@ -314,7 +314,7 @@ export class OpencodeClient {
   }
 
   /** Pending questions from opencode's question API. */
-  async listQuestions(sessionId: string): Promise<AgentQuestionOption[]> {
+  async listQuestions(sessionId: string): Promise<AgentQuestionInfo[]> {
     const body = await this.get(
       `/api/session/${encodeURIComponent(sessionId)}/question`,
       sessionId,
@@ -329,7 +329,7 @@ export class OpencodeClient {
         kind: (str(r.kind) === 'freeform' ? 'freeform' : 'select') as 'select' | 'freeform',
         options: asArray(r.options).map((o) => {
           const opt = o as Record<string, unknown>;
-          return { label: str(opt.label) ?? '', description: str(opt.description) };
+          return { label: str(opt.label) ?? '', description: str(opt.description) ?? undefined };
         }),
         createdAt: str(r.createdAt) ?? new Date().toISOString(),
       };

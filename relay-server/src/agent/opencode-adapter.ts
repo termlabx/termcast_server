@@ -1,5 +1,5 @@
 import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
-import type { AgentSessionSummary, AgentQuestionInfo } from './types.js';
+import type { AgentMessage, AgentSessionSummary, AgentQuestionInfo } from './types.js';
 import type { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEventStream } from './opencode-event-stream.js';
 

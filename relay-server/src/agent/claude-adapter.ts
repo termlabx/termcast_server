@@ -66,6 +66,7 @@ export interface SdkSessionLike {
   stop(): void;
   onEvent(callback: (event: AgentEvent) => void): void;
   resolvePermission(requestId: string, behavior: PermissionBehavior): boolean;
+  resolveQuestion(requestId: string, answers?: string[], rejected?: boolean): boolean;
 }
 
 export type SdkSessionFactory = (sessionId: string, cwd: string) => SdkSessionLike;
