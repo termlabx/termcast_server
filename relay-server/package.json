@@ -1,6 +1,6 @@
 {
   "name": "@termcast/cli",
-  "version": "0.156.0",
+  "version": "0.157.0",
   "description": "Termcast relay server CLI — access your terminal from anywhere",
   "license": "AGPL-3.0-or-later",
   "type": "module",
