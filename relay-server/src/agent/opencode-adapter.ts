@@ -166,6 +166,29 @@ export class OpencodeAdapter implements AgentAdapter {
       if (this.eventStream?.isConnected()) void transcript();
     }, SAFETY_POLL_MS));
 
+    // Reverse-sync: detect when the laptop's TUI has input drafted. Best-effort;
+    // silently degrades if the route is absent or the client is unreachable.
+    let lastDraft: string | null = null;
+    const DRAFT_POLL_MS = 2000;
+    intervals.push(setInterval(async () => {
+      if (stopped) return;
+      try {
+        const draft = await this.client.getDraftPrompt(sessionId);
+        if (stopped) return;
+        if (draft !== null && draft !== lastDraft) {
+          lastDraft = draft;
+          // A draft appearing while the session is idle means the user typed
+          // something in the TUI — show it as a working indicator.
+          if (!wasRunning) {
+            onEvent({ kind: 'status', sessionId, seq: -1, status: 'turn_start' });
+          }
+          onEvent({ kind: 'delta', sessionId, messageId: 'tui-draft', text: draft });
+        }
+      } catch {
+        // Best-effort: ignore failures.
+      }
+    }, DRAFT_POLL_MS));
+
     void transcript();
 
     return () => {
