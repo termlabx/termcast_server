@@ -174,3 +174,67 @@ test('discoverClaudeSessions: project path is where the session started, not whe
 
   assert.equal(session.projectPath, '/Users/me/Projects/repo');
 });
+
+test('discoverClaudeSessions: observer/automation sessions are not listed', async () => {
+  // The claude-mem observer drives Claude Code from a hidden directory and
+  // leaves one transcript per observed turn — 187 of 267 sessions on one
+  // developer machine. Listing them buries the sessions a human actually had.
+  const observer = [
+    JSON.stringify({
+      type: 'user',
+      uuid: 'u1',
+      timestamp: '2026-08-02T10:00:00.000Z',
+      cwd: '/Users/me/.claude-mem/observer-sessions',
+      isMeta: true,
+      message: { role: 'user', content: [{ type: 'text', text: '<observed_from_primary_session>x' }] },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      uuid: 'a1',
+      timestamp: '2026-08-02T10:00:01.000Z',
+      cwd: '/Users/me/.claude-mem/observer-sessions',
+      message: { role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text: 'Recorded' }] },
+    }),
+  ].join('\n') + '\n';
+
+  const root = projectsRoot([
+    { dir: '-Users-me-repo', name: 'aaaa-1111.jsonl', body: transcript('/Users/me/repo') },
+    { dir: '-Users-me--claude-mem-observer-sessions', name: 'bbbb-2222.jsonl', body: observer },
+  ]);
+
+  const sessions = await discoverClaudeSessions(root);
+
+  assert.deepEqual(sessions.map((s) => s.id), ['aaaa-1111']);
+});
+
+test('discoverClaudeSessions: observer sessions with a non-meta user turn are excluded by directory', async () => {
+  // If the observer records its driving prompt as a normal (non-isMeta) user
+  // turn it looks exactly like a real conversation to the transcript heuristic.
+  // The private .claude-mem working directory is the only reliable signal.
+  const sneakyObserver = [
+    JSON.stringify({
+      type: 'user',
+      uuid: 'u1',
+      timestamp: '2026-08-02T10:00:00.000Z',
+      cwd: '/Users/me/.claude-mem/observer-sessions',
+      isMeta: false,
+      message: { role: 'user', content: [{ type: 'text', text: 'Summarise the new commit' }] },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      uuid: 'a1',
+      timestamp: '2026-08-02T10:00:01.000Z',
+      cwd: '/Users/me/.claude-mem/observer-sessions',
+      message: { role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text: 'Done' }] },
+    }),
+  ].join('\n') + '\n';
+
+  const root = projectsRoot([
+    { dir: '-Users-me-repo', name: 'aaaa-1111.jsonl', body: transcript('/Users/me/repo') },
+    { dir: '-Users-me--claude-mem-observer-sessions', name: 'bbbb-2222.jsonl', body: sneakyObserver },
+  ]);
+
+  const sessions = await discoverClaudeSessions(root);
+
+  assert.deepEqual(sessions.map((s) => s.id), ['aaaa-1111']);
+});

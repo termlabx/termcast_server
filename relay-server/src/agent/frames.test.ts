@@ -34,12 +34,12 @@ test('decodeAgentFrame: a non-agent opcode yields null so it falls through to tt
   assert.equal(decodeAgentFrame(frame), null);
 });
 
-test('isAgentOpcode: claims only 0x60-0x68, never the ranges already in use', () => {
+test('isAgentOpcode: claims only 0x60-0x69, never the ranges already in use', () => {
   assert.equal(isAgentOpcode(0x60), true);
-  assert.equal(isAgentOpcode(0x68), true);
+  assert.equal(isAgentOpcode(0x69), true);
   assert.equal(isAgentOpcode(0x09), false);  // mesh invite
   assert.equal(isAgentOpcode(0x41), false);  // port-forward
   assert.equal(isAgentOpcode(0x53), false);  // set-multiplexer
-  assert.equal(isAgentOpcode(0x69), false);
+  assert.equal(isAgentOpcode(0x6a), false);
   assert.equal(isAgentOpcode(0x30), false);  // ttyd data
 });

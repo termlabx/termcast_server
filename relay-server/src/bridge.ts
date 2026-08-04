@@ -4,9 +4,10 @@ import { RelayClient } from './relay-client.js';
 import * as crypto from './crypto.js';
 import { PortForwardHandler } from './port-forward.js';
 import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
+import type { TerminalTarget } from './terminal-targets.js';
 import {
   AGENT_LIST, AGENT_ATTACH, AGENT_DETACH, AGENT_HISTORY,
-  AGENT_SEND, AGENT_INTERRUPT, AGENT_PERMISSION,
+  AGENT_SEND, AGENT_INTERRUPT, AGENT_PERMISSION, AGENT_QUESTION,
   decodeAgentFrame, encodeAgentFrame, isAgentOpcode,
 } from './agent/frames.js';
 
@@ -57,16 +58,34 @@ const MESH_RETRY = 0x52;
 const SELF_EJECT_NOTICE = 0x51;
 const SET_MULTIPLEXER = 0x53;   // phone → server: change the machine setting
 const MULTIPLEXER_STATE = 0x54; // server → phone: active + what is installed
+const TERMINAL_LIST = 0x55;         // phone → server: ask for the terminal picker
+const TERMINAL_LIST_RESULT = 0x56;  // server → phone: the terminal targets
+const TERMINAL_ATTACH = 0x57;       // phone → server: attach terminal to a target
 
 const AGENT_KINDS = ['claude', 'opencode'] as const;
 
 /**
- * Local ttyd WS URL for a session. Phones carry two url-args: their per-phone
- * session id ($1) and the active multiplexer ($2). Non-phone connections carry
- * neither, so the wrapper script falls back to the sidecar file.
+ * Local ttyd WS URL for a session. Phones carry three url-args: their per-phone
+ * session id, the active multiplexer, and an attach flag. In the default case
+ * ($1 = phone id, $2 = multiplexer) the wrapper prefixes the id into this app's
+ * private `tc_`/`tch_` namespace. In attach mode an exact session name is
+ * passed in so the phone can join a session the machine already has.
  */
-export function localWsUrlFor(base: string, phoneId: string | null, mux: Multiplexer | null): string {
+export function localWsUrlFor(
+  base: string,
+  phoneId: string | null,
+  mux: Multiplexer | null,
+  attach: { name: string; mux: 'tmux' | 'herdr' } | null = null,
+): string {
   if (!phoneId) return base;
+  if (attach) {
+    const args = [
+      `arg=${encodeURIComponent(attach.name)}`,
+      `arg=${encodeURIComponent(attach.mux)}`,
+      'arg=1',
+    ];
+    return `${base}?${args.join('&')}`;
+  }
   const args = [`arg=${encodeURIComponent(phoneId)}`];
   if (mux) args.push(`arg=${encodeURIComponent(mux)}`);
   return `${base}?${args.join('&')}`;
@@ -83,6 +102,7 @@ interface ClientSession {
   peerDeviceId: string | null; // deviceId a meshing-in server identified as, or null
   outFrames: Buffer[]; // ttyd→relay frames buffered for the next coalesced flush
   flushScheduled: boolean; // a setImmediate flush is already armed for outFrames
+  attachTarget: TerminalTarget | null; // multiplexer session this terminal attaches to, or null
 }
 
 export class Bridge extends EventEmitter {
@@ -96,6 +116,8 @@ export class Bridge extends EventEmitter {
   // Read per connection, so a multiplexer switch applies to the next phone that
   // connects without respawning ttyd or dropping anyone already attached.
   private multiplexerProvider: (() => Multiplexer) | null = null;
+  // Supplies the machine's current terminal picker when a phone asks (0x55).
+  private terminalTargetsProvider: (() => Promise<TerminalTarget[]> | TerminalTarget[]) | null = null;
 
   private clientConnectHandler: ((connId: number, payload: Buffer) => void) | null = null;
   private messageHandler: ((type: number, connId: number, payload: Buffer) => void) | null = null;
@@ -116,6 +138,11 @@ export class Bridge extends EventEmitter {
   /** Registers the source of the machine's active multiplexer. */
   setMultiplexerProvider(fn: () => Multiplexer): void {
     this.multiplexerProvider = fn;
+  }
+
+  /** Registers the source of the machine's terminal picker (tmux/herdr/bash). */
+  setTerminalTargetsProvider(fn: () => Promise<TerminalTarget[]> | TerminalTarget[]): void {
+    this.terminalTargetsProvider = fn;
   }
 
   /** Registers the predicate that tells whether a peer is currently in our set. */
@@ -212,7 +239,7 @@ export class Bridge extends EventEmitter {
 
   private createSession(connId: number, _metaPayload: Buffer): void {
     this.teardownSession(connId); // clear any stale session reusing this id
-    this.sessions.set(connId, { connId, key: null, localWs: null, portForward: null, pendingLocalFrames: [], isPhone: false, phoneId: null, peerDeviceId: null, outFrames: [], flushScheduled: false });
+    this.sessions.set(connId, { connId, key: null, localWs: null, portForward: null, pendingLocalFrames: [], isPhone: false, phoneId: null, peerDeviceId: null, outFrames: [], flushScheduled: false, attachTarget: null });
     this.emit('client_connected', connId);
   }
 
@@ -239,6 +266,10 @@ export class Bridge extends EventEmitter {
         } catch {
           // A malformed frame is dropped; the setting is left alone.
         }
+      } else if (firstByte === TERMINAL_LIST) {
+        this.handleTerminalList(session);
+      } else if (firstByte === TERMINAL_ATTACH) {
+        this.handleTerminalAttach(session, decrypted.subarray(1));
       } else if (firstByte !== undefined && isAgentOpcode(firstByte)) {
         this.handleAgentFrame(session.connId, decrypted);
       } else if (firstByte !== undefined && firstByte >= 0x40 && firstByte <= 0x43) {
@@ -260,6 +291,55 @@ export class Bridge extends EventEmitter {
       session.pendingLocalFrames.push(frame);
     } else {
       console.error(`[bridge] connId ${session.connId}: localWs not OPEN — dropping terminal frame`);
+    }
+  }
+
+  /**
+   * Reply to a phone's terminal-picker request. The list is resolved fresh so a
+   * session created moments ago is visible; a failure contributes the plain
+   * shell, which is always safe.
+   */
+  private async handleTerminalList(session: ClientSession): Promise<void> {
+    const targets = this.terminalTargetsProvider ? await this.terminalTargetsProvider() : [];
+    this.sendTerminalTargets(session.connId, targets);
+  }
+
+  /**
+   * Re-attach this phone's terminal to an existing multiplexer session (or the
+   * plain shell). The target comes from the picker the phone was just shown, so
+   * the only validation needed is that the shape is sane.
+   */
+  private handleTerminalAttach(session: ClientSession, body: Buffer): void {
+    let target: unknown;
+    try {
+      target = JSON.parse(body.toString());
+    } catch {
+      return; // malformed frame — nothing to attach to
+    }
+    const { kind, name } = (target ?? {}) as { kind?: unknown; name?: unknown };
+    if (kind === 'bash') {
+      session.attachTarget = { kind: 'bash', id: 'bash', name: 'Plain shell' };
+    } else if ((kind === 'tmux' || kind === 'herdr') && typeof name === 'string' && name.trim()) {
+      session.attachTarget = { kind, id: `${kind}:${name}`, name: name.trim() };
+    } else {
+      return; // unrecognised target shape
+    }
+    this.connectLocal(session);
+  }
+
+  /** Encrypt and push the terminal picker to one phone. */
+  sendTerminalTargets(connId: number, targets: TerminalTarget[]): void {
+    const session = this.sessions.get(connId);
+    const key = session?.key;
+    if (!key) return;
+    const inner = Buffer.concat([
+      Buffer.from([TERMINAL_LIST_RESULT]),
+      Buffer.from(JSON.stringify({ targets })),
+    ]);
+    try {
+      this.relay.send(MSG_DATA, connId, crypto.encrypt(inner, key));
+    } catch (err) {
+      console.error('[bridge] terminal list send failed:', (err as Error).message);
     }
   }
 
@@ -315,10 +395,20 @@ export class Bridge extends EventEmitter {
 
       case AGENT_PERMISSION: {
         const { requestId, behavior } = payload;
-        // Strict membership: a typo must be ignored, never coerced into "allow".
         if (typeof requestId !== 'string') return;
         if (behavior !== 'allow' && behavior !== 'deny') return;
         this.emit('agent_permission', { connId, requestId, behavior });
+        return;
+      }
+
+      case AGENT_QUESTION: {
+        const { requestId, answers, rejected } = payload;
+        if (typeof requestId !== 'string') return;
+        if (rejected === true) {
+          this.emit('agent_question', { connId, requestId, rejected: true });
+        } else if (Array.isArray(answers)) {
+          this.emit('agent_question', { connId, requestId, answers: answers.filter((a) => typeof a === 'string') });
+        }
         return;
       }
 
@@ -450,7 +540,20 @@ export class Bridge extends EventEmitter {
     if (session.localWs) { try { session.localWs.close(); } catch {} session.localWs = null; }
 
     const mux = this.multiplexerProvider ? this.multiplexerProvider() : null;
-    const ws = new WebSocket(localWsUrlFor(this.localWsURL, session.phoneId, mux), ['tty']);
+    // A phone that picked a session attaches to it by exact name; one that
+    // picked the plain shell uses `none` with no session override; the default
+    // stays the phone's own isolated session under the machine multiplexer.
+    let attach: { name: string; mux: 'tmux' | 'herdr' } | null = null;
+    let effectiveMux: Multiplexer | null = mux;
+    if (session.attachTarget) {
+      if (session.attachTarget.kind === 'bash') {
+        effectiveMux = 'none';
+      } else {
+        attach = { name: session.attachTarget.name, mux: session.attachTarget.kind };
+        effectiveMux = session.attachTarget.kind;
+      }
+    }
+    const ws = new WebSocket(localWsUrlFor(this.localWsURL, session.phoneId, effectiveMux, attach), ['tty']);
     session.localWs = ws;
 
     ws.on('open', () => {

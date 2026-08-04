@@ -19,7 +19,7 @@ function fakeAdapter(kind: AgentKind, sessions: Partial<AgentSessionSummary>[], 
       onEvent({ kind: 'status', sessionId: 's', seq: 0, status: 'turn_start' } as AgentEvent);
       return () => {};
     },
-    async send() {}, async interrupt() {}, async respondPermission() {},
+    async send() {}, async interrupt() {}, async respondPermission() {}, async respondQuestion() {},
   };
 }
 
@@ -68,4 +68,19 @@ test('subscribe: routing to a missing adapter yields a no-op unsubscribe', async
   stop();
 
   assert.equal(called, false);
+});
+
+test('list: an adapter added via a provider shows up on the next listing', async () => {
+  const state = { opencode: false };
+  const registry = new AgentRegistry(() => [
+    fakeAdapter('claude', [{ id: 'c1', lastActiveAt: '2026-01-01T00:00:00.000Z' }]),
+    ...(state.opencode ? [fakeAdapter('opencode', [{ id: 'o1', lastActiveAt: '2026-08-01T00:00:00.000Z' }])] : []),
+  ]);
+
+  const before = await registry.list();
+  state.opencode = true;
+  const after = await registry.list();
+
+  assert.deepEqual(before.map((s) => s.id), ['c1']);
+  assert.deepEqual(after.map((s) => s.id), ['o1', 'c1']);
 });

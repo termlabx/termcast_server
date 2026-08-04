@@ -169,6 +169,13 @@ test('localWsUrlFor: url-encodes a hostile phone id in both positions', () => {
   );
 });
 
+test('localWsUrlFor: attach mode sends the session name verbatim plus the mux and attach flag', () => {
+  assert.equal(
+    localWsUrlFor('ws://x/ws', 'phone-1', 'herdr', { name: 'web.app-server', mux: 'herdr' }),
+    'ws://x/ws?arg=web.app-server&arg=herdr&arg=1',
+  );
+});
+
 test('Bridge: phone handshake with phone_id emits cluster_paired', () => {
   const serverKP = crypto.generateKeyPair();
   const relay = new FakeRelay();

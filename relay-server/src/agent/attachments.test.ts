@@ -16,7 +16,7 @@ function countingAdapter(): { adapter: AgentAdapter; live: () => number } {
       onEvent({ kind: 'status', sessionId: 's1', seq: 1, status: 'turn_start' } as AgentEvent);
       return () => { live -= 1; };
     },
-    async send() {}, async interrupt() {}, async respondPermission() {},
+    async send() {}, async interrupt() {}, async respondPermission() {}, async respondQuestion() {},
   };
   return { adapter, live: () => live };
 }

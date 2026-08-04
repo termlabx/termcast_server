@@ -1,4 +1,4 @@
-import type { AgentKind, AgentMessage, AgentSessionSummary } from './types.js';
+import type { AgentKind, AgentMessage, AgentSessionSummary, AgentQuestionInfo } from './types.js';
 
 /** A tool call waiting on a human decision. */
 export interface AgentPermissionRequest {
@@ -19,9 +19,10 @@ export type PermissionBehavior = 'allow' | 'deny';
 
 export type AgentEvent =
   | { kind: 'message'; sessionId: string; seq: number; message: AgentMessage }
-  | { kind: 'delta'; sessionId: string; seq: number; text: string }
+  | { kind: 'delta'; sessionId: string; messageId: string; text: string }
   | { kind: 'status'; sessionId: string; seq: number; status: 'turn_start' | 'turn_end' | 'ended' | 'error'; detail?: string }
   | { kind: 'permission'; sessionId: string; seq: number; request: AgentPermissionRequest }
+  | { kind: 'question'; sessionId: string; seq: number; request: AgentQuestionInfo }
   | { kind: 'history'; sessionId: string; beforeSeq: number | null; hasMore: boolean; messages: AgentMessage[] };
 
 export interface HistoryPage {
@@ -49,4 +50,6 @@ export interface AgentAdapter {
   interrupt(sessionId: string): Promise<void>;
   /** Answer a pending permission. Phase 3. */
   respondPermission(requestId: string, behavior: PermissionBehavior): Promise<void>;
+  /** Answer a pending question. */
+  respondQuestion(requestId: string, answers?: string[], rejected?: boolean): Promise<void>;
 }

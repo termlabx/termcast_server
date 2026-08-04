@@ -1,5 +1,5 @@
 import type { AgentEvent, PermissionBehavior } from './adapter.js';
-import type { MessageBlock } from './types.js';
+import type { AgentQuestionInfo, MessageBlock } from './types.js';
 
 const MAX_BLOCK_CHARS = 2048;
 
@@ -69,6 +69,7 @@ export function sdkMessageToBlocks(raw: unknown): MessageBlock[] {
 }
 
 type PermissionResolver = (behavior: PermissionBehavior) => void;
+type QuestionResolver = (answers?: string[], rejected?: boolean) => void;
 
 /**
  * A headless Claude Code session driven by the phone.
@@ -84,6 +85,7 @@ export class ClaudeSdkSession {
   private seq = 0;
   private listener: ((event: AgentEvent) => void) | null = null;
   private readonly pending = new Map<string, PermissionResolver>();
+  private readonly pendingQuestions = new Map<string, QuestionResolver>();
 
   constructor(private readonly sessionId: string, private readonly cwd: string) {}
 
@@ -106,6 +108,15 @@ export class ClaudeSdkSession {
     if (!resolver) return false;
     this.pending.delete(requestId);
     resolver(behavior);
+    return true;
+  }
+
+  /** Resolve a question this session is blocked on. */
+  resolveQuestion(requestId: string, answers?: string[], rejected?: boolean): boolean {
+    const resolver = this.pendingQuestions.get(requestId);
+    if (!resolver) return false;
+    this.pendingQuestions.delete(requestId);
+    resolver(answers, rejected);
     return true;
   }
 
@@ -137,6 +148,41 @@ export class ClaudeSdkSession {
         cwd: this.cwd,
         canUseTool: async (toolName: string, input: Record<string, unknown>) => {
           const requestId = `${this.sessionId}:${this.nextSeq()}`;
+
+          if (toolName === 'AskUserQuestion') {
+            const prompt = typeof input.question === 'string' ? input.question :
+              typeof input.prompt === 'string' ? input.prompt :
+              summarise(toolName, input);
+            const rawOptions = Array.isArray(input.options) ? input.options :
+              Array.isArray(input.suggestions) ? input.suggestions : [];
+            const options = rawOptions.map((o: unknown) => {
+              const opt = o as Record<string, unknown>;
+              return {
+                label: typeof opt.label === 'string' ? opt.label : String(opt),
+                description: typeof opt.description === 'string' ? opt.description : undefined,
+              };
+            });
+            const kind = options.length > 0 ? 'select' : 'freeform';
+            const info: AgentQuestionInfo = {
+              requestId,
+              sessionId: this.sessionId,
+              agent: 'claude',
+              prompt,
+              kind,
+              options,
+              createdAt: new Date().toISOString(),
+            };
+            this.emit({ kind: 'question', sessionId: this.sessionId, seq: this.nextSeq(), request: info });
+
+            const answers = await new Promise<string[] | undefined>((resolve) => {
+              this.pendingQuestions.set(requestId, (a, r) => resolve(r ? undefined : a));
+            });
+            if (answers === undefined) {
+              return { behavior: 'deny' as const, message: 'Question rejected from phone' };
+            }
+            return { behavior: 'allow' as const, updatedInput: { ...input, answer: answers.join(', ') } };
+          }
+
           const clamped = clamp(JSON.stringify(input ?? {}));
           this.emit({
             kind: 'permission',
@@ -206,10 +252,13 @@ export class ClaudeSdkSession {
     this.running = false;
     this.notify?.();
     this.notify = null;
-    // Release anything blocked on a decision so the SDK unwinds rather than hanging.
     for (const [requestId, resolve] of this.pending) {
       this.pending.delete(requestId);
       resolve('deny');
+    }
+    for (const [requestId, resolve] of this.pendingQuestions) {
+      this.pendingQuestions.delete(requestId);
+      resolve(undefined, true);
     }
   }
 }

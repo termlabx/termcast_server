@@ -12,6 +12,37 @@ import { sendKeysCommand } from '../multiplexer.js';
 
 const run = promisify(exec);
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+export interface IdleWaitOptions {
+  settleMs?: number;
+  pollMs?: number;
+  timeoutMs?: number;
+}
+
+/**
+ * Resolves once the pane has read idle on two consecutive samples, so a brief
+ * non-idle blink cannot end a turn early. Bounded so a session abandoned
+ * mid-turn cannot leave a watcher running forever.
+ */
+export async function waitForIdle(
+  sampleIdle: () => Promise<boolean>,
+  opts: IdleWaitOptions = {},
+): Promise<void> {
+  const settleMs = opts.settleMs ?? 2000;
+  const pollMs = opts.pollMs ?? 800;
+  const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
+  await sleep(settleMs);
+  let idleStreak = 0;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const idle = await sampleIdle();
+    idleStreak = idle ? idleStreak + 1 : 0;
+    if (idleStreak >= 2) return;
+    await sleep(pollMs);
+  }
+}
+
 /** Returns false when the pane already has typed input we would interleave with. */
 export async function paneIsIdle(paneId: string): Promise<boolean> {
   try {
@@ -75,6 +106,7 @@ export class ClaudeAdapter implements AgentAdapter {
     (sessionId, cwd) => new ClaudeSdkSession(sessionId, cwd);
   private eventSink: ((event: AgentEvent) => void) | null = null;
   private liveLookup: LiveLookup = () => readLiveSessions();
+  private idleWaiter: (sample: () => Promise<boolean>, opts?: IdleWaitOptions) => Promise<void> = waitForIdle;
   private injector: Injector = async (paneId, text) => {
     if (!(await paneIsIdle(paneId))) return false;
     const command = sendKeysCommand(paneId, text, 'tmux');
@@ -96,6 +128,11 @@ export class ClaudeAdapter implements AgentAdapter {
   /** Test seam. Production injects into tmux with an idle-input guard. */
   setInjector(injector: Injector): void {
     this.injector = injector;
+  }
+
+  /** Test seam. Production waits on the real tmux pane state. */
+  setIdleWaiter(waiter: (sample: () => Promise<boolean>, opts?: IdleWaitOptions) => Promise<void>): void {
+    this.idleWaiter = waiter;
   }
 
   /** Where SDK-originated events go, since they have no transcript to tail. */
@@ -140,6 +177,10 @@ export class ClaudeAdapter implements AgentAdapter {
     if (live?.paneId) {
       const delivered = await this.injector(live.paneId, text);
       if (!delivered) throw new Error('That session is busy at the desk — someone is typing in it.');
+      // The transcript tail streams the reply, but it never announces the end of
+      // a turn — the phone's "Working" indicator would stick forever. Emit
+      // turn_end once the pane returns to idle (Claude Code back at its prompt).
+      void this.watchUntilIdle(sessionId, live.paneId);
       return;
     }
 
@@ -159,6 +200,19 @@ export class ClaudeAdapter implements AgentAdapter {
     session.send(text);
   }
 
+  private async watchUntilIdle(sessionId: string, paneId: string): Promise<void> {
+    const turnEnd = (): void => {
+      this.eventSink?.({ kind: 'status', sessionId, seq: -1, status: 'turn_end' });
+    };
+    try {
+      await this.idleWaiter(() => paneIsIdle(paneId));
+      turnEnd();
+    } catch {
+      // tmux gone or unreadable — end the turn rather than leave the phone stuck.
+      turnEnd();
+    }
+  }
+
   async interrupt(sessionId: string): Promise<void> {
     const session = this.sdkSessions.get(sessionId);
     if (!session) return;
@@ -169,6 +223,12 @@ export class ClaudeAdapter implements AgentAdapter {
   async respondPermission(requestId: string, behavior: PermissionBehavior): Promise<void> {
     for (const session of this.sdkSessions.values()) {
       if (session.resolvePermission(requestId, behavior)) return;
+    }
+  }
+
+  async respondQuestion(requestId: string, answers?: string[], rejected?: boolean): Promise<void> {
+    for (const session of this.sdkSessions.values()) {
+      if (session.resolveQuestion(requestId, answers, rejected)) return;
     }
   }
 }

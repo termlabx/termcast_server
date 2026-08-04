@@ -237,6 +237,74 @@ test('sessionMetaFromTranscript: the fallback title ignores injected meta turns'
   assert.equal(meta.title, 'the real first question');
 });
 
+/**
+ * Claude Code writes its own interruption notice as a user turn. On a machine
+ * with automation sessions — whose real prompts are all `isMeta` — that notice
+ * is the only visible "human" text, so it became the title of 34 of 263 local
+ * sessions. Every one of them read "[Request interrupted by user]".
+ */
+test('sessionMetaFromTranscript: an interruption notice never becomes the title', () => {
+  const meta = sessionMetaFromTranscript([
+    userText('injected automation prompt', { isMeta: true }),
+    userText('[Request interrupted by user]', { interruptedByShutdown: true }),
+    assistantText('what the agent actually did'),
+  ]);
+
+  assert.equal(meta.title, 'what the agent actually did');
+});
+
+test('sessionMetaFromTranscript: an interrupt for tool use is skipped too', () => {
+  const meta = sessionMetaFromTranscript([
+    userText('[Request interrupted by user for tool use]', { interruptedMessageId: 'msg_01' }),
+    userText('the real question'),
+  ]);
+
+  assert.equal(meta.title, 'the real question');
+});
+
+/** Transcripts written before ~2.1.216 carry no interruption field at all. */
+test('sessionMetaFromTranscript: a legacy interrupt notice is recognised by its text', () => {
+  const meta = sessionMetaFromTranscript([
+    userText('[Request interrupted by user]'),
+    userText('the real question'),
+  ]);
+
+  assert.equal(meta.title, 'the real question');
+});
+
+test('sessionMetaFromTranscript: a session with nothing but an interrupt is honestly untitled', () => {
+  const meta = sessionMetaFromTranscript([
+    userText('injected automation prompt', { isMeta: true }),
+    userText('[Request interrupted by user]', { interruptedByShutdown: true }),
+  ]);
+
+  assert.equal(meta.title, 'Untitled session');
+});
+
+/** A human writing *about* an interrupt still owns their message. */
+test('sessionMetaFromTranscript: text merely mentioning an interrupt still titles the session', () => {
+  const meta = sessionMetaFromTranscript([
+    userText('why do I keep seeing [Request interrupted by user] everywhere?'),
+  ]);
+
+  assert.equal(meta.title, 'why do I keep seeing [Request interrupted by user] everywhere?');
+});
+
+/** Same class of bug on the other side: "You've hit your session limit". */
+test('sessionMetaFromTranscript: a synthetic assistant turn never becomes the title', () => {
+  const meta = sessionMetaFromTranscript([
+    userText('injected automation prompt', { isMeta: true }),
+    JSON.stringify({
+      type: 'assistant', uuid: 'a0', timestamp: '2026-08-02T10:00:00.000Z', sessionId: 's1',
+      cwd: '/repo', isSidechain: false,
+      message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: "You've hit your session limit" }] },
+    }),
+    assistantText('the real opening line'),
+  ]);
+
+  assert.equal(meta.title, 'the real opening line');
+});
+
 test('sessionMetaFromTranscript: reports cwd, model and last activity for the list row', () => {
   const meta = sessionMetaFromTranscript([userText('hi'), assistantText('hello')]);
 
@@ -277,4 +345,35 @@ test('sessionMetaFromTranscript: titles an agent-driven session from the assista
   ]);
 
   assert.equal(meta.title, 'Recording the observation');
+});
+
+test('sessionMetaFromTranscript: an observer session is not user-initiated', () => {
+  // claude-mem and other automation drive Claude Code with prompts written as
+  // isMeta user turns, so the session has no human turn at all. Measured over a
+  // 294-transcript corpus this separates 184 observer sessions from 83 real
+  // ones with no false positives either way.
+  const meta = sessionMetaFromTranscript([
+    userText('<observed_from_primary_session>noise', { isMeta: true }),
+    assistantText('Recording the observation'),
+  ]);
+
+  assert.equal(meta.userInitiated, false);
+});
+
+test('sessionMetaFromTranscript: a typed turn makes the session user-initiated', () => {
+  const meta = sessionMetaFromTranscript([userText('hello'), assistantText('hi there')]);
+
+  assert.equal(meta.userInitiated, true);
+});
+
+test('sessionMetaFromTranscript: an interruption notice alone is not a human turn', () => {
+  // Claude Code records "the user pressed Esc" as a user turn. Every automation
+  // session accumulates them, so counting one as human would unhide them all.
+  const meta = sessionMetaFromTranscript([
+    userText('<observed_from_primary_session>noise', { isMeta: true }),
+    assistantText('working'),
+    userText('[Request interrupted by user]'),
+  ]);
+
+  assert.equal(meta.userInitiated, false);
 });

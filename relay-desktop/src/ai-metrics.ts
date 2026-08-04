@@ -13,6 +13,7 @@ import { createInterface } from 'node:readline';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
+import { dayKey } from './ai-usage';
 
 /** A session counts as active if touched within this window. */
 export const ACTIVE_WINDOW_MS = 15 * 60 * 1000;
@@ -60,6 +61,26 @@ export interface CollectOptions {
   now?: number;
 }
 
+/** One billable request, after deduplication. */
+export interface UsageRecord {
+  source: 'claude-code' | 'opencode';
+  sessionId: string;
+  model: string;
+  /** ms epoch of the request. */
+  at: number;
+  /** Local-time day key, YYYY-MM-DD, computed at collection time. */
+  day: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** Cache lifetime implied by the request's ephemeral bucket, ms. 0 if unknown. */
+  cacheTtlMs: number;
+  stopReason?: string;
+  /** The turn was cut short by the user. */
+  interrupted?: boolean;
+}
+
 const noTokens: SessionTokens = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
 
 function defaultClaudeProjectsDir(): string {
@@ -91,6 +112,30 @@ function claudeTopic(content: unknown): string | null {
   return null;
 }
 
+/** Plain-text extraction from a message content field (string or blocks). */
+function claudeContentText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter(b => b && typeof b === 'object' && typeof b.text === 'string')
+      .map(b => (b as { text: string }).text)
+      .join(' ');
+  }
+  return '';
+}
+
+function num(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/** Cache lifetime in ms implied by a Claude Code usage cache_creation bucket. */
+function cacheTtlMs(usage: Record<string, unknown>): number {
+  const creation = usage.cache_creation as Record<string, unknown> | undefined;
+  if (creation && num(creation.ephemeral_1h_input_tokens) > 0) return 3_600_000;
+  if (creation && num(creation.ephemeral_5m_input_tokens) > 0) return 300_000;
+  return 0;
+}
+
 // ---- Claude Code -----------------------------------------------------------
 
 interface ClaudeAccumulator {
@@ -109,17 +154,21 @@ function accModel(acc: ClaudeAccumulator, model: string): ModelTrace {
   return m;
 }
 
-async function parseClaudeSessionFile(file: string, now: number): Promise<SessionInfo | null> {
+async function parseClaudeSessionFile(file: string, now: number): Promise<{ session: SessionInfo | null; records: UsageRecord[] }> {
   let stat: Stats;
   try {
     stat = statSync(file);
-    if (!stat.isFile()) return null;
+    if (!stat.isFile()) return { session: null, records: [] };
   } catch {
-    return null;
+    return { session: null, records: [] };
   }
 
   const acc: ClaudeAccumulator = { topic: null, project: null, createdAt: null, models: new Map() };
+  const records: UsageRecord[] = [];
+  const seenIds = new Set<string>();
+  const recent: Array<{ assistant: UsageRecord | null }> = [];
   let model: string | null = null;
+  const sessionId = basename(file, '.jsonl');
 
   try {
     const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
@@ -138,23 +187,65 @@ async function parseClaudeSessionFile(file: string, now: number): Promise<Sessio
         if (!Number.isNaN(t)) acc.createdAt = t;
       }
 
+      recent.push({ assistant: null });
+      if (recent.length > 4) recent.shift();
+      const cur = recent[recent.length - 1];
+
       const type = obj.type;
-      if (type === 'user' && acc.topic === null) {
+      if (type === 'user') {
         const msg = obj.message as { content?: unknown; role?: string } | undefined;
-        if (msg?.role === 'user') acc.topic = truncate(claudeTopic(msg.content) ?? '', 160) || null;
+        if (acc.topic === null && msg?.role === 'user') {
+          acc.topic = truncate(claudeTopic(msg.content) ?? '', 160) || null;
+        }
+        if (msg && claudeContentText(msg.content).toLowerCase().includes('request interrupted by user')) {
+          for (let i = recent.length - 2, n = 0; i >= 0 && n < 3; i--, n++) {
+            const a = recent[i].assistant;
+            if (a) {
+              a.interrupted = true;
+              break;
+            }
+          }
+        }
       } else if (type === 'assistant') {
-        const m = typeof obj.model === 'string' ? obj.model : null;
-        if (m) {
-          model = m;
-          const entry = accModel(acc, m);
-          entry.messages++;
-          const u = obj.usage as
-            | { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
-            | undefined;
-          entry.inputTokens += u?.input_tokens ?? 0;
-          entry.outputTokens += u?.output_tokens ?? 0;
-          entry.cacheReadTokens += u?.cache_read_input_tokens ?? 0;
-          entry.cacheWriteTokens += u?.cache_creation_input_tokens ?? 0;
+        const msg = (obj.message ?? obj) as {
+          id?: unknown; model?: unknown; stop_reason?: unknown; usage?: unknown;
+        };
+        const id = typeof msg.id === 'string' ? msg.id : '';
+        if (id && seenIds.has(id)) {
+          // duplicate content block of an already-counted response
+        } else {
+          if (id) seenIds.add(id);
+          const m = typeof msg.model === 'string' ? msg.model : null;
+          if (m) {
+            model = m;
+            const entry = accModel(acc, m);
+            const u = (msg.usage ?? {}) as Record<string, unknown>;
+            const input = num(u.input_tokens);
+            const output = num(u.output_tokens);
+            const cacheRead = num(u.cache_read_input_tokens);
+            const cacheWrite = num(u.cache_creation_input_tokens);
+            entry.messages += 1;
+            entry.inputTokens += input;
+            entry.outputTokens += output;
+            entry.cacheReadTokens += cacheRead;
+            entry.cacheWriteTokens += cacheWrite;
+
+            const at = typeof obj.timestamp === 'string' ? Date.parse(obj.timestamp) : NaN;
+            records.push({
+              source: 'claude-code',
+              sessionId,
+              model: m,
+              at: Number.isNaN(at) ? 0 : at,
+              day: Number.isNaN(at) ? '' : dayKey(at),
+              input,
+              output,
+              cacheRead,
+              cacheWrite,
+              cacheTtlMs: cacheTtlMs(u),
+              stopReason: typeof msg.stop_reason === 'string' ? msg.stop_reason : undefined,
+            });
+            cur.assistant = records[records.length - 1];
+          }
         }
       } else if (type === 'summary' && acc.topic === null) {
         const s = obj.summary;
@@ -162,7 +253,7 @@ async function parseClaudeSessionFile(file: string, now: number): Promise<Sessio
       }
     }
   } catch {
-    return null;
+    return { session: null, records: [] };
   }
 
   const trace = [...acc.models.values()].sort((a, b) => b.messages - a.messages);
@@ -177,31 +268,35 @@ async function parseClaudeSessionFile(file: string, now: number): Promise<Sessio
   if (!acc.topic) acc.topic = '(no prompt)';
   const updatedAt = stat.mtimeMs;
   return {
-    source: 'claude-code',
-    id: basename(file, '.jsonl'),
-    project: acc.project ?? '',
-    topic: acc.topic,
-    active: now - updatedAt <= ACTIVE_WINDOW_MS,
-    createdAt: acc.createdAt ?? stat.birthtimeMs,
-    updatedAt,
-    currentModel: model ?? trace[0]?.model ?? '',
-    tokens,
-    modelTrace: trace,
+    session: {
+      source: 'claude-code',
+      id: sessionId,
+      project: acc.project ?? '',
+      topic: acc.topic,
+      active: now - updatedAt <= ACTIVE_WINDOW_MS,
+      createdAt: acc.createdAt ?? stat.birthtimeMs,
+      updatedAt,
+      currentModel: model ?? trace[0]?.model ?? '',
+      tokens,
+      modelTrace: trace,
+    },
+    records,
   };
 }
 
-async function collectClaudeCodeSessions(opts: CollectOptions, now: number): Promise<SessionInfo[]> {
+async function collectClaudeCodeSessions(opts: CollectOptions, now: number): Promise<{ sessions: SessionInfo[]; records: UsageRecord[] }> {
   const dir = opts.claudeProjectsDir ?? defaultClaudeProjectsDir();
-  if (!existsSync(dir)) return [];
+  if (!existsSync(dir)) return { sessions: [], records: [] };
 
   let projects: string[];
   try {
     projects = readdirSync(dir);
   } catch {
-    return [];
+    return { sessions: [], records: [] };
   }
 
   const sessions: SessionInfo[] = [];
+  const records: UsageRecord[] = [];
   for (const name of projects) {
     const projectDir = join(dir, name);
     let stat: Stats;
@@ -218,19 +313,16 @@ async function collectClaudeCodeSessions(opts: CollectOptions, now: number): Pro
     } catch {
       continue;
     }
-    // Newest first, and only look at the tail so a fat project (dozens of
-    // multi-MB transcripts) doesn't stall the popup. 25 per project is plenty
-    // for an overview.
     const jsonls = files.filter(f => f.endsWith('.jsonl'))
       .map(f => join(projectDir, f))
-      .sort((a, b) => statSyncSafe(b).mtimeMs - statSyncSafe(a).mtimeMs)
-      .slice(0, 25);
+      .sort((a, b) => statSyncSafe(b).mtimeMs - statSyncSafe(a).mtimeMs);
     for (const file of jsonls) {
-      const s = await parseClaudeSessionFile(file, now);
-      if (s) sessions.push(s);
+      const parsed = await parseClaudeSessionFile(file, now);
+      if (parsed.session) sessions.push(parsed.session);
+      records.push(...parsed.records);
     }
   }
-  return sessions;
+  return { sessions, records };
 }
 
 function statSyncSafe(file: string): Stats {
@@ -266,55 +358,130 @@ function modelLabel(model: { id?: string; providerID?: string } | null | undefin
     : model.id;
 }
 
+function providerLabel(providerID: string | undefined, modelID: string): string {
+  return providerID && providerID !== 'opencode' ? `${providerID}/${modelID}` : modelID;
+}
+
+function accModelTrace(trace: Map<string, ModelTrace>, model: string): ModelTrace {
+  let entry = trace.get(model);
+  if (!entry) {
+    entry = { model, messages: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    trace.set(model, entry);
+  }
+  return entry;
+}
+
 function parseOpencodeSession(
   db: DatabaseSync,
   row: OpencodeRow,
   now: number,
-): SessionInfo {
+): { session: SessionInfo; records: UsageRecord[] } {
   let modelObj: { id?: string; providerID?: string } | null = null;
   try {
     modelObj = row.model ? JSON.parse(row.model) as { id?: string; providerID?: string } : null;
   } catch { /* keep null */ }
 
-  // Per-model trace from message rows. assistant messages carry modelID +
-  // tokens; cap the scan so one enormous session can't stall the popup.
+  // Per-model trace from assistant message rows, deduplicated by id across
+  // both opencode table generations.
   const trace = new Map<string, ModelTrace>();
-  const msgRows = db.prepare(
-    'SELECT data FROM message WHERE session_id = ? ORDER BY time_created ASC LIMIT 800',
-  ).all(row.id) as { data: string }[];
+  const records: UsageRecord[] = [];
+  const seenIds = new Set<string>();
 
   let lastModel = modelLabel(modelObj);
-  let msgTokens: SessionTokens = { ...noTokens };
+  const msgRows = db.prepare(
+    'SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC',
+  ).all(row.id) as { id: string; data: string; time_created: number }[];
+
   for (const m of msgRows) {
-    let data: { role?: string; modelID?: string; providerID?: string; tokens?: Record<string, unknown> };
+    let data: {
+      role?: string; modelID?: string; providerID?: string; finish?: string;
+      tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } };
+    };
     try {
       data = JSON.parse(m.data) as typeof data;
     } catch {
       continue;
     }
-    if (data.role === 'assistant' && data.modelID) {
-      const label = data.providerID && data.providerID !== 'opencode'
-        ? `${data.providerID}/${data.modelID}`
-        : data.modelID;
-      lastModel = label;
-      let entry = trace.get(label);
-      if (!entry) {
-        entry = { model: label, messages: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-        trace.set(label, entry);
-      }
-      entry.messages++;
-      const t = (data.tokens ?? {}) as {
-        input?: number; output?: number; reasoning?: number;
-        cache?: { read?: number; write?: number };
-      };
-      entry.inputTokens += t.input ?? 0;
-      entry.outputTokens += t.output ?? 0;
-      entry.cacheReadTokens += t.cache?.read ?? 0;
-      entry.cacheWriteTokens += t.cache?.write ?? 0;
-    }
+    if (data.role !== 'assistant' || !data.modelID) continue;
+    if (m.id) seenIds.add(m.id);
+    const label = providerLabel(data.providerID, data.modelID);
+    lastModel = label;
+    const entry = accModelTrace(trace, label);
+    const t = data.tokens ?? {};
+    const input = t.input ?? 0;
+    const output = t.output ?? 0;
+    const cacheRead = t.cache?.read ?? 0;
+    const cacheWrite = t.cache?.write ?? 0;
+    entry.messages += 1;
+    entry.inputTokens += input;
+    entry.outputTokens += output;
+    entry.cacheReadTokens += cacheRead;
+    entry.cacheWriteTokens += cacheWrite;
+    records.push({
+      source: 'opencode',
+      sessionId: row.id,
+      model: label,
+      at: m.time_created,
+      day: dayKey(m.time_created),
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      cacheTtlMs: 0,
+      stopReason: data.finish === 'length' ? 'max_tokens' : undefined,
+    });
   }
 
-  msgTokens = {
+  try {
+    const newRows = db.prepare(
+      `SELECT id, data, time_created FROM session_message
+       WHERE session_id = ? AND type = 'assistant' ORDER BY time_created ASC`,
+    ).all(row.id) as { id: string; data: string; time_created: number }[];
+    for (const m of newRows) {
+      if (m.id && seenIds.has(m.id)) continue;
+      if (m.id) seenIds.add(m.id);
+      let data: {
+        model?: { id?: string; providerID?: string }; finish?: string;
+        tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } };
+      };
+      try {
+        data = JSON.parse(m.data) as typeof data;
+      } catch {
+        continue;
+      }
+      const label = modelLabel(data.model);
+      if (!label) continue;
+      lastModel = label;
+      const entry = accModelTrace(trace, label);
+      const t = data.tokens ?? {};
+      const input = t.input ?? 0;
+      const output = t.output ?? 0;
+      const cacheRead = t.cache?.read ?? 0;
+      const cacheWrite = t.cache?.write ?? 0;
+      entry.messages += 1;
+      entry.inputTokens += input;
+      entry.outputTokens += output;
+      entry.cacheReadTokens += cacheRead;
+      entry.cacheWriteTokens += cacheWrite;
+      records.push({
+        source: 'opencode',
+        sessionId: row.id,
+        model: label,
+        at: m.time_created,
+        day: dayKey(m.time_created),
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        cacheTtlMs: 0,
+        stopReason: data.finish === 'length' ? 'max_tokens' : undefined,
+      });
+    }
+  } catch {
+    // session_message table absent in older opencode installs — legacy only
+  }
+
+  const msgTokens: SessionTokens = {
     input: row.tokens_input ?? 0,
     output: row.tokens_output ?? 0,
     reasoning: row.tokens_reasoning ?? 0,
@@ -324,30 +491,33 @@ function parseOpencodeSession(
 
   const updatedAt = row.time_updated;
   return {
-    source: 'opencode',
-    id: row.id,
-    project: row.directory ?? '',
-    topic: truncate(row.title || '(no title)', 160),
-    active: now - updatedAt <= ACTIVE_WINDOW_MS,
-    createdAt: row.time_created,
-    updatedAt,
-    currentModel: lastModel,
-    agent: row.agent ?? undefined,
-    cost: row.cost ?? undefined,
-    tokens: msgTokens,
-    modelTrace: [...trace.values()].sort((a, b) => b.messages - a.messages),
+    session: {
+      source: 'opencode',
+      id: row.id,
+      project: row.directory ?? '',
+      topic: truncate(row.title || '(no title)', 160),
+      active: now - updatedAt <= ACTIVE_WINDOW_MS,
+      createdAt: row.time_created,
+      updatedAt,
+      currentModel: lastModel,
+      agent: row.agent ?? undefined,
+      cost: row.cost ?? undefined,
+      tokens: msgTokens,
+      modelTrace: [...trace.values()].sort((a, b) => b.messages - a.messages),
+    },
+    records,
   };
 }
 
-async function collectOpencodeSessions(opts: CollectOptions, now: number): Promise<SessionInfo[]> {
+async function collectOpencodeSessions(opts: CollectOptions, now: number): Promise<{ sessions: SessionInfo[]; records: UsageRecord[] }> {
   const dbPath = opts.opencodeDbPath ?? defaultOpencodeDbPath();
-  if (!existsSync(dbPath)) return [];
+  if (!existsSync(dbPath)) return { sessions: [], records: [] };
 
   let db: DatabaseSync;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
   } catch {
-    return [];
+    return { sessions: [], records: [] };
   }
 
   try {
@@ -359,7 +529,14 @@ async function collectOpencodeSessions(opts: CollectOptions, now: number): Promi
        FROM session
        ORDER BY time_updated DESC`,
     ).all() as unknown as OpencodeRow[];
-    return rows.map(row => parseOpencodeSession(db, row, now));
+    const sessions: SessionInfo[] = [];
+    const records: UsageRecord[] = [];
+    for (const row of rows) {
+      const parsed = parseOpencodeSession(db, row, now);
+      sessions.push(parsed.session);
+      records.push(...parsed.records);
+    }
+    return { sessions, records };
   } finally {
     db.close();
   }
@@ -367,12 +544,19 @@ async function collectOpencodeSessions(opts: CollectOptions, now: number): Promi
 
 // ---- entry point -----------------------------------------------------------
 
-/** All known sessions from both tools, newest first. */
-export async function collectSessions(opts: CollectOptions = {}): Promise<SessionInfo[]> {
+/** All known sessions from both tools, plus per-request usage records. */
+export async function collectUsage(opts: CollectOptions = {}): Promise<{ sessions: SessionInfo[]; records: UsageRecord[] }> {
   const now = opts.now ?? Date.now();
   const [claude, opencode] = await Promise.all([
     collectClaudeCodeSessions(opts, now),
     collectOpencodeSessions(opts, now),
   ]);
-  return [...claude, ...opencode].sort((a, b) => b.updatedAt - a.updatedAt);
+  const sessions = [...claude.sessions, ...opencode.sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+  return { sessions, records: [...claude.records, ...opencode.records] };
+}
+
+/** All known sessions from both tools, newest first. */
+export async function collectSessions(opts: CollectOptions = {}): Promise<SessionInfo[]> {
+  const { sessions } = await collectUsage(opts);
+  return sessions;
 }

@@ -6,12 +6,25 @@ import { readLiveSessions, applyLiveness } from './session-registry.js';
  * Fans requests out across the installed adapters and routes by (agent, id).
  * Session ids are only unique within one agent, so the agent kind is part of
  * every route.
+ *
+ * Adapters may be given as a provider function so an adapter can appear (or
+ * vanish) between requests — e.g. opencode is discovered lazily, so a server
+ * that started before opencode was available still picks it up on the next
+ * session listing without a restart.
  */
 export class AgentRegistry {
-  constructor(private readonly adapters: AgentAdapter[]) {}
+  private readonly adapters: AgentAdapter[] | (() => AgentAdapter[]);
+
+  constructor(adapters: AgentAdapter[] | (() => AgentAdapter[])) {
+    this.adapters = adapters;
+  }
+
+  private currentAdapters(): AgentAdapter[] {
+    return typeof this.adapters === 'function' ? this.adapters() : this.adapters;
+  }
 
   adapterFor(kind: AgentKind): AgentAdapter | null {
-    return this.adapters.find((a) => a.kind === kind) ?? null;
+    return this.currentAdapters().find((a) => a.kind === kind) ?? null;
   }
 
   /**
@@ -20,7 +33,7 @@ export class AgentRegistry {
    */
   async list(): Promise<AgentSessionSummary[]> {
     const results = await Promise.all(
-      this.adapters.map(async (adapter) => {
+      this.currentAdapters().map(async (adapter) => {
         try {
           return await adapter.list();
         } catch {

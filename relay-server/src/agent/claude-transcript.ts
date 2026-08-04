@@ -28,6 +28,27 @@ export interface SessionMeta {
   model: string | null;
   lastActiveAt: string | null;
   messageCount: number;
+  /**
+   * True when a human typed at least one turn.
+   *
+   * Automation — claude-mem's observer above all — drives Claude Code with
+   * prompts written as `isMeta` user turns, so an observer session contains no
+   * human turn at all while otherwise looking exactly like a real one. That
+   * absence is the only reliable signal: over a 294-transcript corpus it
+   * separated 184 observer sessions from 83 real ones with no misclassification
+   * in either direction.
+   */
+  userInitiated: boolean;
+  /**
+   * Entries of type `user`/`assistant` seen, counting the ones `messageCount`
+   * hides (meta prompts, sidechains, hook output).
+   *
+   * This is "was this transcript driven by anything at all", which is what
+   * separates an automation session from a file we simply failed to read:
+   * `userInitiated` is false for both, but only the automation session has
+   * turns in it.
+   */
+  turnCount: number;
 }
 
 /**
@@ -45,6 +66,7 @@ export function sessionMetaFromTranscript(lines: string[]): SessionMeta {
   let model: string | null = null;
   let lastActiveAt: string | null = null;
   let messageCount = 0;
+  let turnCount = 0;
 
   lines.forEach((line, seq) => {
     const entry = parseLine(line);
@@ -62,6 +84,10 @@ export function sessionMetaFromTranscript(lines: string[]): SessionMeta {
     // happened to end up rather than the project the session belongs to.
     if (!projectPath && typeof entry.cwd === 'string' && entry.cwd) projectPath = entry.cwd;
 
+    // Counted before toMessage, which drops the meta and sidechain turns that
+    // are exactly the ones proving an automation session was driven.
+    if (entry.type === 'user' || entry.type === 'assistant') turnCount += 1;
+
     const message = toMessage(entry, seq);
     if (!message) return;
 
@@ -72,11 +98,12 @@ export function sessionMetaFromTranscript(lines: string[]): SessionMeta {
       const envelope = entry.message as Record<string, unknown> | undefined;
       // Claude Code tags system-generated turns (rate-limit notices, interrupts)
       // with a bracketed pseudo-model such as "<synthetic>". Those must not
-      // become the session's reported model.
+      // become the session's reported model — nor its title.
+      const synthetic = !envelope || typeof envelope.model !== 'string' || envelope.model.startsWith('<');
       if (envelope && typeof envelope.model === 'string' && !envelope.model.startsWith('<')) {
         model = envelope.model;
       }
-      if (firstAssistantText === null) {
+      if (firstAssistantText === null && !synthetic) {
         const text = message.blocks.find((b) => b.kind === 'text');
         if (text && text.kind === 'text') firstAssistantText = text.text;
       }
@@ -84,7 +111,9 @@ export function sessionMetaFromTranscript(lines: string[]): SessionMeta {
 
     if (firstUserText === null && message.role === 'user') {
       const text = message.blocks.find((b) => b.kind === 'text');
-      if (text && text.kind === 'text') firstUserText = text.text;
+      if (text && text.kind === 'text' && !isInterruptionNotice(entry, text.text)) {
+        firstUserText = text.text;
+      }
     }
   });
 
@@ -98,7 +127,36 @@ export function sessionMetaFromTranscript(lines: string[]): SessionMeta {
     model,
     lastActiveAt,
     messageCount,
+    // Exactly the turns that qualify as a title candidate: non-meta, non-
+    // sidechain, not hook-authored, carrying text, and not Claude Code's own
+    // interruption notice. Anything looser re-admits the observer sessions.
+    userInitiated: firstUserText !== null,
+    turnCount,
   };
+}
+
+/**
+ * True for Claude Code's own "the user pressed Esc" notice, which it records as
+ * a user turn even though nobody typed it.
+ *
+ * It must never be a title candidate: a session whose only visible human text is
+ * that notice — every automation session, since their real prompts are all
+ * `isMeta` — would otherwise be listed as "[Request interrupted by user]", a
+ * label that describes no session in particular.
+ *
+ * Newer Claude Code marks the entry structurally: `interruptedMessageId` names
+ * the turn that was cut off, and `interruptedByShutdown` covers an SDK session
+ * torn down mid-flight. Transcripts written before ~2.1.216 carry neither, so
+ * the notice text is matched as a fallback for those — anchored at the start,
+ * so a human quoting the phrase still titles their own session.
+ *
+ * Only ever consulted for the title; the notice still renders in the
+ * conversation, where it is a real thing that happened.
+ */
+function isInterruptionNotice(entry: Record<string, unknown>, text: string): boolean {
+  if (entry.interruptedByShutdown === true) return true;
+  if (typeof entry.interruptedMessageId === 'string') return true;
+  return /^\[Request interrupted by user/.test(text);
 }
 
 function parseLine(line: string): Record<string, unknown> | null {

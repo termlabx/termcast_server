@@ -79,6 +79,23 @@ async function summarise(path: string, id: string): Promise<AgentSessionSummary 
 
   const meta = sessionMetaFromTranscript(slice.split('\n'));
 
+  // Automation sessions are skipped rather than listed and de-emphasised: on a
+  // machine running the claude-mem observer they outnumber real sessions 2:1,
+  // and none of them is a conversation anyone would want to open on a phone.
+  //
+  // Conditioned on the transcript containing turns, so the judgement is only
+  // ever made about a session something actually drove. A corrupt or
+  // metadata-only file keeps its row — "no human turn found" there means the
+  // read failed, not that a robot drove the session.
+  if (meta.turnCount > 0 && !meta.userInitiated) return null;
+
+  // A belt-and-braces guard on the directory itself. The cwd-based heuristic
+  // above only fires while the observer keeps writing its prompts as `isMeta`
+  // turns; if the observer process ever records a realistic user turn those
+  // transcripts would masquerade as real conversations. The directory is
+  // unambiguous, so it is checked regardless of how the turn was written.
+  if (isObserverCwd(meta.projectPath)) return null;
+
   return {
     id,
     agent: 'claude',
@@ -94,6 +111,20 @@ async function summarise(path: string, id: string): Promise<AgentSessionSummary 
     model: meta.model,
     needsAttention: false,
   };
+}
+
+/**
+ * True when a session's cwd places it inside an observer's private working
+ * directory. Both the claude-mem observer and its sibling tooling keep their
+ * per-turn sessions under a `.claude-mem` tree whose subdirectory is literally
+ * `observer-sessions`, so the path is a structural guarantee that no human ever
+ * started the session there.
+ */
+function isObserverCwd(cwd: string): boolean {
+  if (!cwd) return false;
+  const parts = cwd.replace(/[\\/]+/g, '/').split('/').filter(Boolean);
+  if (parts.some((p) => p === '.claude-mem')) return true;
+  return false;
 }
 
 /**

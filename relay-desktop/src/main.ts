@@ -24,7 +24,8 @@ import { parseClientLogEvents, parseMultiplexerLogEvent } from './server-log-par
 import { forwardLabel, versionLabel, statusDot, clientLabel, clientDetailLines, clientDevice, isServerClient, peerDetailLines, trayTooltip, type ForwardState } from './tray-format';
 import { trayStatus, type TrayStatus } from './tray-status';
 import { trayIconFile } from './tray-icons';
-import { collectSessions } from './ai-metrics';
+import { collectUsage } from './ai-metrics';
+import { summarize } from './ai-usage';
 import { aiMetricsHtml } from './ai-metrics-html';
 
 interface Settings {
@@ -367,7 +368,7 @@ function showAiMetricsWindow(): void {
 
   aiMetricsWindow = new BrowserWindow({
     width: 760,
-    height: 640,
+    height: 720,
     resizable: true,
     center: true,
     alwaysOnTop: true,
@@ -383,9 +384,9 @@ function showAiMetricsWindow(): void {
     </style></head><body>Scanning Claude Code / opencode sessions…</body></html>`;
   aiMetricsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loading)}`);
 
-  collectSessions()
-    .then(sessions => {
-      const html = aiMetricsHtml(sessions);
+  collectUsage()
+    .then(({ sessions, records }) => {
+      const html = aiMetricsHtml(sessions, summarize(records));
       const file = join(app.getPath('temp'), `ai-metrics-${Date.now()}.html`);
       writeFileSync(file, html);
       aiMetricsHtmlFile = file;

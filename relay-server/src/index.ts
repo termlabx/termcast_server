@@ -38,12 +38,14 @@ import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSy
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
 import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
+import { listTerminalTargets } from './terminal-targets.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
 import { AgentRegistry } from './agent/registry.js';
 import { AttachmentManager } from './agent/attachments.js';
 import { ClaudeAdapter } from './agent/claude-adapter.js';
 import { OpencodeAdapter } from './agent/opencode-adapter.js';
-import { OpencodeClient } from './agent/opencode-client.js';
+import { OpencodeEventStream } from './agent/opencode-event-stream.js';
+import { OpencodeClient, defaultOpencodeDbPath } from './agent/opencode-client.js';
 import { OpencodeServer } from './agent/opencode-server.js';
 import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
 import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
@@ -607,16 +609,45 @@ program
       active: currentMultiplexer,
       installed: detectInstalledMultiplexers(),
     }));
+    // The raw-terminal picker resolves fresh on every request, so a session the
+    // user just created is visible without waiting for anything.
+    bridge.setTerminalTargetsProvider(() => listTerminalTargets());
 
     // --- Agent sessions -----------------------------------------------------
     // opencode is optional: if no server can be found or spawned, only Claude
     // Code sessions are listed. A missing agent is never an error.
+    //
+    // It is discovered lazily on every session listing, so a server started
+    // before opencode was available picks it up without a restart, and a
+    // crashed `opencode serve` is recovered on the next listing.
     const opencodeServer = new OpencodeServer();
-    const opencodeUrl = await opencodeServer.start();
-    const agentAdapters: AgentAdapter[] = [new ClaudeAdapter()];
-    if (opencodeUrl) agentAdapters.push(new OpencodeAdapter(new OpencodeClient(opencodeUrl)));
+    let opencodeAdapter: OpencodeAdapter | null = null;
+    let opencodeUrl: string | null = null;
 
-    const agentRegistry = new AgentRegistry(agentAdapters);
+    const ensureOpencode = async (): Promise<void> => {
+      const url = await opencodeServer.ensureRunning();
+      if (url === opencodeUrl) return;
+      opencodeUrl = url;
+      opencodeAdapter = url
+        ? new OpencodeAdapter(
+            new OpencodeClient(url, defaultOpencodeDbPath()),
+            new OpencodeEventStream({ baseUrl: url }),
+          )
+        : null;
+      if (url) {
+        console.log(`\x1b[32m✓ opencode sessions enabled via ${url}\x1b[0m`);
+      } else {
+        console.warn('\x1b[33m⚠ opencode not available — only Claude Code sessions will be listed.\x1b[0m');
+      }
+    };
+    await ensureOpencode();
+
+    const claudeAdapter = new ClaudeAdapter();
+    const adapterProvider = (): AgentAdapter[] => [
+      claudeAdapter,
+      ...(opencodeAdapter ? [opencodeAdapter] : []),
+    ];
+    const agentRegistry = new AgentRegistry(adapterProvider);
     const attachments = new AttachmentManager(agentRegistry);
 
     const approvalsEnabled = (): boolean => {
@@ -628,6 +659,7 @@ program
     };
 
     bridge.on('agent_list', async ({ connId }: { connId: number }) => {
+      await ensureOpencode();
       const sessions = await agentRegistry.list();
       bridge.sendAgentFrame(connId, AGENT_SESSIONS, { sessions, approvalsEnabled: approvalsEnabled() });
     });
@@ -657,7 +689,6 @@ program
 
     // SDK sessions have no transcript to tail, so their events are pushed to
     // every connection currently attached to that session.
-    const claudeAdapter = agentAdapters[0] as ClaudeAdapter;
     claudeAdapter.setEventSink((event) => {
       for (const connId of attachments.connectionsFor(event.sessionId)) {
         bridge.sendAgentFrame(connId, AGENT_EVENT, event);
@@ -695,8 +726,14 @@ program
     bridge.on('agent_permission', async (req: { requestId: string; behavior: 'allow' | 'deny' }) => {
       permissionBroker.resolve(req.requestId, req.behavior);
       // SDK-driven sessions hold their own resolvers.
-      for (const adapter of agentAdapters) {
+      for (const adapter of adapterProvider()) {
         await adapter.respondPermission(req.requestId, req.behavior).catch(() => {});
+      }
+    });
+
+    bridge.on('agent_question', async (req: { connId: number; requestId: string; answers?: string[]; rejected?: boolean }) => {
+      for (const adapter of adapterProvider()) {
+        await adapter.respondQuestion(req.requestId, req.answers, req.rejected).catch(() => {});
       }
     });
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMultiplexerShellArgs, stripNestingEnv } from './ttyd-manager.js';
+import { buildMultiplexerShellArgs, stripNestingEnv, wrapperSignature } from './ttyd-manager.js';
 
 const base = {
   shell: '/bin/zsh',
@@ -33,22 +33,33 @@ test('buildMultiplexerShellArgs: stays POSIX — tr, not bash pattern substituti
 
 test('buildMultiplexerShellArgs: tmux keeps the exact legacy session name', () => {
   const script = buildMultiplexerShellArgs(base)[2];
-  assert.match(script, /exec '\/usr\/bin\/tmux' new-session -A -s "tc_\$s"/);
+  assert.match(script, /exec '\/usr\/bin\/tmux' new-session -A -s "tc_\$sname"/);
 });
 
 test('buildMultiplexerShellArgs: herdr attaches-or-creates its own namespace', () => {
   const script = buildMultiplexerShellArgs(base)[2];
-  assert.match(script, /herdr\) exec '\/home\/u\/\.termcast\/bin\/herdr' --session "tch_\$s"/);
+  assert.match(script, /herdr:\*\) exec '\/home\/u\/\.termcast\/bin\/herdr' --session "tch_\$sname"/);
 });
 
 test('buildMultiplexerShellArgs: none execs the bare shell', () => {
   const script = buildMultiplexerShellArgs(base)[2];
-  assert.match(script, /none\) exec '\/bin\/zsh'/);
+  assert.match(script, /none:\*\) exec '\/bin\/zsh'/);
+});
+
+test('buildMultiplexerShellArgs: attach mode uses the session name verbatim, unprefixed and unsanitised', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  // Attach mode ($3 = 1) skips the sanitisation prefix path entirely.
+  assert.match(script, /\$\{3:-\}/);
+  assert.match(script, /if \[ "\$a" = "1" \]; then sname="\$s"/);
+  // tmux and herdr attach branches take the raw name (no tc_/tch_ prefix).
+  assert.match(script, /\*:1\) exec '\/usr\/bin\/tmux' new-session -A -s "\$sname"/);
+  assert.match(script, /herdr:1\) exec '\/home\/u\/\.termcast\/bin\/herdr' --session "\$sname"/);
 });
 
 test('buildMultiplexerShellArgs: an unresolved binary gets no branch at all', () => {
   const script = buildMultiplexerShellArgs({ ...base, herdrPath: null })[2];
-  assert.doesNotMatch(script, /herdr\)/);
+  assert.doesNotMatch(script, /herdr:1\)/);
+  assert.doesNotMatch(script, /herdr:\*\)/);
   assert.match(script, /new-session -A -s/);
 });
 
@@ -81,4 +92,24 @@ test('stripNestingEnv: leaves unrelated variables untouched and does not mutate 
   const cleaned = stripNestingEnv(env);
   assert.deepEqual(cleaned, { PATH: '/usr/bin', HOME: '/Users/u', TERM: 'xterm-256color' });
   assert.equal(env.HERDR_ENV, '1', 'process.env must not be mutated');
+});
+
+test('wrapperSignature: identical argv yields an identical fingerprint', () => {
+  const a = buildMultiplexerShellArgs(base);
+  const b = buildMultiplexerShellArgs(base);
+  assert.equal(wrapperSignature(a), wrapperSignature(b));
+  assert.match(wrapperSignature(a), /^[0-9a-f]{8}$/);
+});
+
+test('wrapperSignature: any binary change flips the fingerprint (stale-orphan guard)', () => {
+  const withTmux = wrapperSignature(buildMultiplexerShellArgs(base));
+  const tmuxGone = wrapperSignature(buildMultiplexerShellArgs({ ...base, tmuxPath: null, herdrPath: null }));
+  const herdrAdded = wrapperSignature(buildMultiplexerShellArgs({ ...base, herdrPath: '/home/u/.local/bin/herdr' }));
+  const shellChanged = wrapperSignature(buildMultiplexerShellArgs({ ...base, shell: '/bin/bash' }));
+  assert.notEqual(withTmux, tmuxGone);
+  assert.notEqual(withTmux, herdrAdded);
+  assert.notEqual(withTmux, shellChanged);
+  // The same args never collide regardless of how they were produced.
+  assert.equal(wrapperSignature(buildMultiplexerShellArgs({ ...base, herdrPath: '/home/u/.local/bin/herdr' })),
+    herdrAdded);
 });

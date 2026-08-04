@@ -33,6 +33,14 @@ export interface AgentMessage {
   /** ISO 8601, or null for records the agent wrote without one. */
   timestamp: string | null;
   blocks: MessageBlock[];
+  /**
+   * True only for a user turn the agent has accepted but not answered yet —
+   * opencode queues a prompt sent while a turn is still running, so the
+   * message is real and on screen while its reply is not. Absent/false for
+   * everything else; a turn is "answered" once a completed assistant message
+   * follows it.
+   */
+  pending?: boolean;
 }
 
 export interface AgentSessionSummary {
@@ -51,4 +59,24 @@ export interface AgentSessionSummary {
   model: string | null;
   /** True when a permission request is waiting on an answer. */
   needsAttention: boolean;
+}
+
+export interface AgentQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface AgentQuestionInfo {
+  requestId: string;
+  sessionId: string;
+  agent: AgentKind;
+  prompt: string;
+  kind: 'select' | 'freeform';
+  options: AgentQuestionOption[];
+  createdAt: string;
+}
+
+export interface AgentQuestion extends AgentQuestionInfo {
+  answers?: string[];
+  rejected?: boolean;
 }

@@ -14,9 +14,10 @@ export const AGENT_PERMISSION = 0x65;
 export const AGENT_DETACH = 0x66;
 export const AGENT_INTERRUPT = 0x67;
 export const AGENT_HISTORY = 0x68;
+export const AGENT_QUESTION = 0x69;
 
 const FIRST = AGENT_LIST;
-const LAST = AGENT_HISTORY;
+const LAST = AGENT_QUESTION;
 
 export function isAgentOpcode(byte: number): boolean {
   return byte >= FIRST && byte <= LAST;

@@ -28,13 +28,23 @@ function terminalTitle(): string {
 
 /**
  * argv for ttyd so that per-connection `?arg=` values (enabled by ttyd's
- * `--url-arg`) select both the session and the multiplexer: `$1` is the phone
- * id, `$2` is `tmux` | `herdr` | `none`. With no url-args (browser/local view),
- * `$1` is `shared` and `$2` comes from the sidecar file.
+ * `--url-arg`) select the session, the multiplexer, and attach mode:
+ * `$1` is the session token, `$2` is `tmux` | `herdr` | `none`, and `@arg 3`
+ * (`a`) is `1` when the token is an exact session name to attach rather than a
+ * phone id to prefix.
  *
- * Phones always send `$2` (bridge.ts). Everything else falls back to the
- * sidecar, which is rewritten whenever the setting changes — so a switch
- * applies without respawning ttyd and without dropping connections.
+ * Two modes:
+ *   - Default (phones / legacy): `$1` is the phone id and is sanitised and
+ *     prefixed into this app's private `tc_`/`tch_` namespace.
+ *   - Attach: `$1` is an existing session name taken verbatim — tmux and herdr
+ *     both attach-or-create with the given name, so the prefix must be dropped
+ *     and the name must NOT be run through the `tr` sanitiser (tmux session
+ *     names commonly contain `.` and `-`).
+ *
+ * With no url-args (browser/local view), `$1` is `shared` and `$2` comes from
+ * the sidecar file. Phones always send `$2` (bridge.ts). Everything else falls
+ * back to the sidecar, which is rewritten whenever the setting changes — so a
+ * switch applies without respawning ttyd and without dropping connections.
  *
  * The script MUST stay POSIX-portable. `shell` is whatever $SHELL points to,
  * which on Debian/Ubuntu servers is /bin/sh (dash) — dash aborts bashisms like
@@ -58,21 +68,44 @@ export function buildMultiplexerShellArgs(opts: {
   // Only resolved binaries get a branch; anything unresolved falls through to
   // the default, which degrades to a bare shell when tmux is missing too.
   const branches: string[] = [];
-  if (herdrPath) branches.push(`  herdr) exec '${herdrPath}' --session "tch_$s" ;;`);
-  branches.push(`  none) exec '${shell}' ;;`);
+  if (herdrPath) branches.push(`  herdr:1) exec '${herdrPath}' --session "$sname" ;;`);
+  if (herdrPath) branches.push(`  herdr:*) exec '${herdrPath}' --session "tch_$sname" ;;`);
+  branches.push(`  none:*) exec '${shell}' ;;`);
   branches.push(tmuxPath
-    ? `  *) exec '${tmuxPath}' new-session -A -s "tc_$s" ;;`
+    ? `  *:1) exec '${tmuxPath}' new-session -A -s "$sname" ;;`
+    : `  *:1) exec '${shell}' ;;`);
+  branches.push(tmuxPath
+    ? `  *) exec '${tmuxPath}' new-session -A -s "tc_$sname" ;;`
     : `  *) exec '${shell}' ;;`);
 
   const script = [
-    `s="\${1:-shared}"; m="\${2:-$(cat '${sidecarPath}' 2>/dev/null || echo ${fallback})}"`,
-    `s="$(printf %s "$s" | tr -c 'A-Za-z0-9_' '_')"`,
-    'case "$m" in',
+    `s="\${1:-shared}"; m="\${2:-$(cat '${sidecarPath}' 2>/dev/null || echo ${fallback})}"; a="\${3:-}"`,
+    `if [ "$a" = "1" ]; then sname="$s"; else sname="$(printf %s "$s" | tr -c 'A-Za-z0-9_' '_')"; fi`,
+    'case "$m:$a" in',
     ...branches,
     'esac',
   ].join('\n');
 
   return [shell, '-c', script, 'termcast'];
+}
+
+/**
+ * Stable fingerprint of the shell args we would spawn, so start() can tell an
+ * orphaned termcastd that was born from the *current* wrapper script from one
+ * left over by an older build. A salt-free FNV-1a over the full argv is enough:
+ * identical binaries and shell yield identical output, and any difference (a
+ * newly installed multiplexer, our attach-mode work, a shell change) flips it.
+ */
+export function wrapperSignature(shellArgs: string[]): string {
+  let h = 2166136261; // FNV offset basis
+  for (const part of shellArgs) {
+    for (let i = 0; i < part.length; i++) {
+      h ^= part.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    h = Math.imul(h ^ 0x1e3, 16777619);
+  }
+  return (h >>> 0).toString(16);
 }
 
 /**
@@ -116,6 +149,11 @@ export function resolveMultiplexerBinary(mux: 'tmux' | 'herdr'): string | null {
       join(__dirname, '..', 'bin', name),
       join(__dirname, '..', '..', 'bin', name),
       join(homedir(), '.termcast', 'bin', name),
+      // The `curl | sh` installer for herdr (and several brew tap flows) drops
+      // the binary in ~/.local/bin, which is frequently NOT on the PATH the
+      // desktop app/relay process inherits. Resolving it here keeps the
+      // terminal picker working even when `which herdr` fails.
+      join(homedir(), '.local', 'bin', name),
     ]) {
       if (existsSync(p)) return p;
     }
@@ -204,31 +242,6 @@ export class TtydManager extends EventEmitter {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    // Adopt an orphaned ttyd left behind by a previous crash instead of spawning a new one
-    const saved = this.readPidFile();
-    if (saved && this.isPidAlive(saved.pid)) {
-      console.log(`Adopting orphaned termcastd on port ${saved.port} (pid ${saved.pid})`);
-      this.orphanPid = saved.pid;
-      this.port = saved.port;
-      this.startedAt = Date.now();
-      this.emit('started', this.port);
-      return;
-    }
-    this.removePidFile();
-
-    // Find an available port, starting from the configured one
-    const startPort = this.port;
-    while (await this.isPortInUse(this.port)) {
-      this.port++;
-      if (this.port > startPort + 100) {
-        console.error(`\x1b[31mError: No available port found (tried ${startPort}-${this.port - 1}).\x1b[0m`);
-        process.exit(1);
-      }
-    }
-    if (this.port !== startPort) {
-      console.log(`Port ${startPort} in use, using ${this.port} instead`);
-    }
-
     const ttydPath = this.findTtyd();
 
     // Verify ttyd can actually execute — catches missing dylib (e.g. libwebsockets-evlib_uv.dylib)
@@ -269,6 +282,47 @@ export class TtydManager extends EventEmitter {
       sidecarPath: join(homedir(), '.ttyd-server', 'multiplexer'),
       fallback: this.multiplexer,
     });
+    const signature = wrapperSignature(shellArgs);
+
+    // Adopt an orphaned ttyd left behind by a previous crash instead of
+    // spawning a new one — but ONLY when it was born from the exact wrapper we
+    // would spawn now. An orphan from an older build (before the attach /
+    // terminal-picker work, or one that started before a multiplexer was
+    // installed) keeps its old argv forever: it would answer every phone with
+    // /bin/zsh — including a phone that asked to attach to a tmux session. A
+    // signature mismatch respawns instead, which also self-heals upgrades.
+    const saved = this.readPidFile();
+    const orphan = saved && this.isPidAlive(saved.pid) ? saved : null;
+    if (orphan) {
+      if (orphan.signature === signature) {
+        console.log(`Adopting orphaned termcastd on port ${orphan.port} (pid ${orphan.pid})`);
+        this.orphanPid = orphan.pid;
+        this.port = orphan.port;
+        this.startedAt = Date.now();
+        this.emit('started', this.port);
+        return;
+      }
+      console.log(`Orphaned termcastd on port ${orphan.port} (pid ${orphan.pid}) has an outdated wrapper — respawning it`);
+      try { process.kill(orphan.pid, 'SIGTERM'); } catch {}
+      // Give the dying orphan a moment to release its port so we can reuse it.
+      for (let i = 0; i < 30 && await this.isPortInUse(orphan.port); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    this.removePidFile();
+
+    // Find an available port, starting from the configured one
+    const startPort = this.port;
+    while (await this.isPortInUse(this.port)) {
+      this.port++;
+      if (this.port > startPort + 100) {
+        console.error(`\x1b[31mError: No available port found (tried ${startPort}-${this.port - 1}).\x1b[0m`);
+        process.exit(1);
+      }
+    }
+    if (this.port !== startPort) {
+      console.log(`Port ${startPort} in use, using ${this.port} instead`);
+    }
 
     // Serve an augmented client (ttyd's own client plus our injected clipboard
     // script) so the browser view gets mouse-select-to-copy and Ctrl/Cmd+V
@@ -332,7 +386,7 @@ export class TtydManager extends EventEmitter {
     });
 
     if (this.process.pid) {
-      this.writePidFile(this.process.pid, this.port);
+      this.writePidFile(this.process.pid, this.port, signature);
     }
 
     this.startedAt = Date.now();
@@ -362,10 +416,10 @@ export class TtydManager extends EventEmitter {
     try { process.kill(pid, 0); return true; } catch { return false; }
   }
 
-  private writePidFile(pid: number, port: number): void {
+  private writePidFile(pid: number, port: number, signature: string): void {
     try {
       mkdirSync(join(homedir(), '.termcast'), { recursive: true });
-      writeFileSync(this.pidFile, JSON.stringify({ pid, port }));
+      writeFileSync(this.pidFile, JSON.stringify({ pid, port, signature }));
     } catch {}
   }
 
@@ -374,7 +428,7 @@ export class TtydManager extends EventEmitter {
     try { unlinkSync(this.legacyPidFile); } catch {}
   }
 
-  private readPidFile(): { pid: number; port: number } | null {
+  private readPidFile(): { pid: number; port: number; signature?: string } | null {
     for (const p of [this.pidFile, this.legacyPidFile]) {
       try { return JSON.parse(readFileSync(p, 'utf-8')); } catch {}
     }
@@ -409,13 +463,18 @@ export class TtydManager extends EventEmitter {
       const downloadedPath = join(downloadDir, binaryName);
       if (existsSync(downloadedPath)) return downloadedPath;
 
-      // 3. System tmux
+      // 3. Home-local binary (~/.local/bin), mirroring resolveMultiplexerBinary
+      for (const p of [join(homedir(), '.local', 'bin', 'tmux')]) {
+        if (existsSync(p)) return p;
+      }
+
+      // 4. System tmux
       try {
         const systemPath = execSync('which tmux', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
         if (systemPath) return systemPath;
       } catch {}
 
-      // 4. Download lazily — failure here must not crash the server
+      // 5. Download lazily — failure here must not crash the server
       const url = releaseUrl(resolveBaseUrl(), binaryName);
       console.log(`tmux not found — downloading for ${process.platform}-${process.arch}...`);
       mkdirSync(downloadDir, { recursive: true });
@@ -457,7 +516,11 @@ export class TtydManager extends EventEmitter {
       // 2. Previously downloaded binary
       if (existsSync(downloadedPath)) return downloadedPath;
 
-      // 3. System herdr (brew / curl install)
+      // 3. System herdr (brew / curl install) — also ~/.local/bin, which the
+      //    curl installer uses but which is often absent from the server PATH.
+      for (const p of [join(homedir(), '.local', 'bin', 'herdr')]) {
+        if (existsSync(p)) return p;
+      }
       try {
         const systemPath = execSync('which herdr', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
         if (systemPath) return systemPath;
