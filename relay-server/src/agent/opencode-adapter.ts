@@ -1,5 +1,5 @@
 import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
-import type { AgentMessage, AgentSessionSummary, AgentQuestionInfo } from './types.js';
+import type { AgentMessage, AgentSessionSummary, AgentQuestionInfo, MessageBlock } from './types.js';
 import type { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEventStream } from './opencode-event-stream.js';
 
@@ -18,6 +18,9 @@ const SAFETY_POLL_MS = 15_000;
 const STRUCTURAL_DEBOUNCE_MS = 150;
 /** Coalesces a burst of text deltas into one or two relay frames. */
 const DELTA_FLUSH_MS = 100;
+/** Bounded fallback when a transcript tool-use predates the question API. */
+const QUESTION_RETRY_ATTEMPTS = 3;
+const QUESTION_RETRY_DELAY_MS = 500;
 
 export class OpencodeAdapter implements AgentAdapter {
   readonly kind = 'opencode' as const;
@@ -63,6 +66,7 @@ export class OpencodeAdapter implements AgentAdapter {
     let stopped = false;
     /** message id → fingerprint of what we last sent for it. */
     const sent = new Map<string, string>();
+    const seenQuestionToolUseIds = new Set<string>();
     let wasRunning: boolean | null = null;
 
     const intervals: ReturnType<typeof setInterval>[] = [];
@@ -71,35 +75,47 @@ export class OpencodeAdapter implements AgentAdapter {
 
     const transcript = async () => {
       if (stopped) return;
-      const { messages, running } = await this.client.listTranscript(sessionId);
-      if (stopped) return;
+      try {
+        const { messages, running } = await this.client.listTranscript(sessionId);
+        if (stopped) return;
 
-      for (const message of messages) {
-        if (message.seq <= sinceSeq && !sent.has(message.id)) continue;
-        // The pending flag is part of identity, not just content: a queued user
-        // message and its eventual reply are the same id, and only the flag
-        // distinguishes them. Without it the queued state, once emitted, would
-        // never be re-rendered as answered.
-        const fingerprint = JSON.stringify({ blocks: message.blocks, pending: message.pending ?? false });
-        if (sent.get(message.id) === fingerprint) continue;
-        sent.set(message.id, fingerprint);
-        onEvent({ kind: 'message', sessionId, seq: message.seq, message });
+        for (const message of messages) {
+          if (message.seq <= sinceSeq && !sent.has(message.id)) continue;
+          // The pending flag is part of identity, not just content: a queued user
+          // message and its eventual reply are the same id, and only the flag
+          // distinguishes them. Without it the queued state, once emitted, would
+          // never be re-rendered as answered.
+          const fingerprint = JSON.stringify({ blocks: message.blocks, pending: message.pending ?? false });
+          if (sent.get(message.id) === fingerprint) continue;
+          sent.set(message.id, fingerprint);
+          onEvent({ kind: 'message', sessionId, seq: message.seq, message });
+        }
+
+        // The phone's "Working…" indicator is driven entirely by these; the first
+        // read only reports a turn already in progress, so it cannot race the
+        // send and clear a spinner the user just triggered.
+        const settling = wasRunning === null && !running;
+        if (running !== wasRunning && !settling) {
+          onEvent({
+            kind: 'status', sessionId, seq: -1,
+            status: running ? 'turn_start' : 'turn_end',
+          });
+        }
+        wasRunning = running;
+
+        // Detect opencode `question` tool calls and emit question events.
+        await detectQuestions(this.client, seenQuestionToolUseIds, messages, sessionId, onEvent);
+      } catch (err) {
+        // A read failure (SSE or HTTP) while a turn is tracked must not leave
+        // the phone spinning "Working…" forever: emit one error and forget the
+        // running flag. The next successful read re-derives everything, so a
+        // silent idle failure stays silent and recovery is automatic.
+        if (stopped) return;
+        if (wasRunning) {
+          wasRunning = false;
+          onEvent({ kind: 'status', sessionId, seq: -1, status: 'error', detail: `transcript read failed: ${(err as Error).message}` });
+        }
       }
-
-      // The phone's "Working…" indicator is driven entirely by these; the first
-      // read only reports a turn already in progress, so it cannot race the
-      // send and clear a spinner the user just triggered.
-      const settling = wasRunning === null && !running;
-      if (running !== wasRunning && !settling) {
-        onEvent({
-          kind: 'status', sessionId, seq: -1,
-          status: running ? 'turn_start' : 'turn_end',
-        });
-      }
-      wasRunning = running;
-
-      // Detect opencode `question` tool calls and emit question events.
-      await detectQuestions(messages, sessionId, onEvent);
     };
 
     // --- structural events → debounced transcript read ----------------------
@@ -224,7 +240,43 @@ export class OpencodeAdapter implements AgentAdapter {
 
 const seenQuestionToolUseIds = new Set<string>();
 
+/**
+ * Convert an unstructured `question` tool-use block into an `AgentQuestionInfo`,
+ * or `null` when the block carries nothing usable. The transcript can race the
+ * question API, so the block is only a fallback.
+ */
+function parseQuestionToolUse(block: MessageBlock, sessionId: string): AgentQuestionInfo | null {
+  const toolUseId = block.toolUseId;
+  if (!toolUseId) return null;
+
+  let prompt: string;
+  let options: { label: string; description: string | undefined }[] = [];
+  try {
+    const input = JSON.parse(block.input) as Record<string, unknown>;
+    const rawOptions = Array.isArray(input.options) ? input.options : [];
+    options = rawOptions.map((o: unknown) => {
+      const opt = o as Record<string, unknown>;
+      return {
+        label: typeof opt.label === 'string' ? opt.label : String(opt),
+        description: typeof opt.description === 'string' ? opt.description : undefined,
+      };
+    });
+    prompt = typeof input.prompt === 'string' ? input.prompt : block.summary;
+  } catch {
+    prompt = block.summary;
+  }
+  if (!prompt.trim() && options.length === 0) return null;
+
+  return {
+    requestId: toolUseId, sessionId, agent: 'opencode',
+    prompt, kind: options.length > 0 ? 'select' : 'freeform', options,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 async function detectQuestions(
+  client: OpencodeClient,
+  seen: Set<string>,
   messages: AgentMessage[],
   sessionId: string,
   onEvent: (event: AgentEvent) => void,
@@ -234,31 +286,30 @@ async function detectQuestions(
     for (const block of message.blocks) {
       if (block.kind !== 'toolUse' || block.name !== 'question') continue;
       const toolUseId = block.toolUseId;
-      if (!toolUseId || seenQuestionToolUseIds.has(toolUseId)) continue;
-      seenQuestionToolUseIds.add(toolUseId);
+      if (!toolUseId || seen.has(toolUseId)) continue;
+      seen.add(toolUseId);
 
-      let input: Record<string, unknown>;
-      try {
-        input = JSON.parse(block.input) as Record<string, unknown>;
-      } catch {
-        continue;
+      // The question API is authoritative; the block is a fallback. When neither
+      // resolves, retry the API for a bounded window — a block can appear in the
+      // transcript a moment before the question is queryable.
+      let request: AgentQuestionInfo | null = null;
+      for (let attempt = 0; attempt < QUESTION_RETRY_ATTEMPTS && !request; attempt += 1) {
+        const entries = await client.listQuestions(sessionId).catch(() => []);
+        const entry = entries.find((e) => e.requestId === toolUseId);
+        if (entry) {
+          request = entry;
+        } else {
+          request = parseQuestionToolUse(block, sessionId);
+          if (!request && attempt + 1 < QUESTION_RETRY_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, QUESTION_RETRY_DELAY_MS));
+          }
+        }
       }
-      const prompt = typeof input.prompt === 'string' ? input.prompt : block.summary;
-      const rawOptions = Array.isArray(input.options) ? input.options : [];
-      const options = rawOptions.map((o: unknown) => {
-        const opt = o as Record<string, unknown>;
-        return {
-          label: typeof opt.label === 'string' ? opt.label : String(opt),
-          description: typeof opt.description === 'string' ? opt.description : undefined,
-        };
-      });
-      const kind = options.length > 0 ? 'select' : 'freeform';
+      if (!request) continue;
+
       onEvent({
         kind: 'question', sessionId, seq: message.seq,
-        request: {
-          requestId: toolUseId, sessionId, agent: 'opencode',
-          prompt, kind, options, createdAt: new Date().toISOString(),
-        },
+        request,
       });
     }
   }

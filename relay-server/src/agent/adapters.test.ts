@@ -8,7 +8,7 @@ import { OpencodeAdapter, AgentUnsupportedError } from './opencode-adapter.js';
 import { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEvent, OpencodeEventStream } from './opencode-event-stream.js';
 import type { AgentEvent } from './adapter.js';
-import type { AgentMessage } from './types.js';
+import type { AgentMessage, AgentQuestionInfo } from './types.js';
 
 const line = (text: string) => JSON.stringify({
   type: 'user',
@@ -141,13 +141,17 @@ test('ClaudeAdapter.send: a live session ends the turn once its pane is idle aga
   adapter.setEventSink((event) => {
     if (event.kind === 'status') statuses.push(event.status);
   });
+  adapter.setIdleSampler(async () => {
+    idleSamples += 1;
+    return idleSamples >= 2;
+  });
   adapter.setIdleWaiter(async (sample) => {
     // Two samples: busy, then idle.
     await sample();
     await sample();
   });
   adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
-  adapter.setInjector(async () => { idleSamples += 1; return true; });
+  adapter.setInjector(async () => true);
   adapter.setSessionFactory(() => {
     return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
@@ -219,6 +223,11 @@ const assistant = (id: string, text: string): AgentMessage => ({
 
 const queuedUser = (id: string, text: string, pending: boolean): AgentMessage => ({
   id, seq: 1, role: 'user', timestamp: null, blocks: [{ kind: 'text', text }], pending,
+});
+
+const questionToolUse = (id: string, input: string): AgentMessage => ({
+  id: `q-${id}`, seq: 1, role: 'assistant', timestamp: null,
+  blocks: [{ kind: 'toolUse', toolUseId: id, name: 'question', summary: '', input }],
 });
 
 test('OpencodeAdapter.subscribe: re-emits a message whose content grew', async () => {
@@ -312,6 +321,83 @@ test('OpencodeAdapter.subscribe: re-emits a queued user turn once it is answered
   stop();
 
   assert.deepEqual(pending, [true, false]);
+});
+
+test('OpencodeAdapter.subscribe: emits a question once per toolUse id', async () => {
+  // The seen-set must live in the subscription: the poll re-reads the same
+  // transcript repeatedly, and a module-global set would (a) leak across
+  // sessions and (b) never be pruned.
+  const client = {
+    listTranscript: async () => ({
+      messages: [questionToolUse('q_1', '{"prompt":"Pick one","options":[{"label":"A"},{"label":"B"}]}')],
+      running: false,
+    }),
+    listQuestions: async () => [],
+  } as unknown as OpencodeClient;
+  const questions: AgentQuestionInfo[] = [];
+  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (event) => {
+    if (event.kind === 'question') questions.push(event.request);
+  });
+  await new Promise((r) => setTimeout(r, 1600));
+  stop();
+
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0].requestId, 'q_1');
+  assert.equal(questions[0].kind, 'select');
+  assert.deepEqual(questions[0].options, [
+    { label: 'A', description: undefined },
+    { label: 'B', description: undefined },
+  ]);
+});
+
+test('OpencodeAdapter.subscribe: retries listQuestions before dropping an unparseable question', async () => {
+  // opencode can record the tool-use block before the question API has it; the
+  // adapter must fall back to listQuestions within a bounded retry, not guess.
+  let calls = 0;
+  const client = {
+    listTranscript: async () => ({ messages: [questionToolUse('q_1', 'not-json')], running: false }),
+    listQuestions: async () => {
+      calls += 1;
+      return calls >= 2
+        ? [{ requestId: 'q_1', sessionId: 'ses_abc', agent: 'opencode', prompt: 'Recovered', kind: 'select' as const, options: [], createdAt: '' }]
+        : [];
+    },
+  } as unknown as OpencodeClient;
+  const questions: AgentQuestionInfo[] = [];
+  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (event) => {
+    if (event.kind === 'question') questions.push(event.request);
+  });
+  await new Promise((r) => setTimeout(r, 1600));
+  stop();
+
+  assert.ok(calls >= 2, `expected at least 2 listQuestions calls, got ${calls}`);
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0].prompt, 'Recovered');
+});
+
+test('OpencodeAdapter.subscribe: a read failure clears a stuck working state', async () => {
+  // `void transcript()` used to swallow listTranscript rejections: the phone's
+  // "Working…" spun forever because no turn_end (or error) ever arrived. A
+  // failure while a turn is being tracked must emit one error status.
+  let tick = 0;
+  const client = {
+    listTranscript: async () => {
+      tick += 1;
+      if (tick === 1) return { messages: [], running: true };
+      if (tick === 2) throw new Error('connection lost');
+      return { messages: [assistant('msg_1', 'answer')], running: false };
+    },
+    listQuestions: async () => [],
+  } as unknown as OpencodeClient;
+  const statuses: { status: string; detail?: string }[] = [];
+  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (event) => {
+    if (event.kind === 'status') statuses.push({ status: event.status, detail: event.detail });
+  });
+  await new Promise((r) => setTimeout(r, 2600));
+  stop();
+
+  assert.deepEqual(statuses.map((s) => s.status), ['turn_start', 'error']);
+  assert.match(statuses[1].detail ?? '', /connection lost/);
 });
 
 // --- signal-driven subscribe (the /api/event routing split) ----------------
