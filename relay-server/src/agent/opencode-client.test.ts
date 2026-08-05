@@ -499,3 +499,20 @@ test('listSessions: a session whose messages are only in the v2 store still list
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('answerQuestion: pins the opencode body to the nested [answers] shape', async () => {
+  // opencode's answer endpoint expects `answers` as an array of answer rows —
+  // `[["B"]]` for a single select choice, each row itself an array of parts.
+  // Sending a flat `["B"]` silently drops every answer on older opencode builds.
+  const seen: { path: string; body: unknown; directory?: string }[] = [];
+  const s = await stub({ 'POST /api/session/question/q_1/answer': { ok: true } }, seen);
+
+  try {
+    await new OpencodeClient(s.url).answerQuestion('q_1', ['B']);
+
+    assert.deepEqual(seen.map((r) => r.path), ['/api/session/question/q_1/answer']);
+    assert.deepEqual(seen[0].body, { answers: [['B']] });
+  } finally {
+    await s.stop();
+  }
+});

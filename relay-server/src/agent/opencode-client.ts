@@ -337,7 +337,9 @@ export class OpencodeClient {
   }
 
   async answerQuestion(requestId: string, answers: string[]): Promise<void> {
-    await this.post(`/api/session/question/${encodeURIComponent(requestId)}/answer`, { answers });
+    // opencode's answer endpoint takes an array of answer rows (each row itself
+    // an array of parts). A flat list is silently dropped by older builds.
+    await this.post(`/api/session/question/${encodeURIComponent(requestId)}/answer`, { answers: [answers] });
   }
 
   async rejectQuestion(requestId: string): Promise<void> {
