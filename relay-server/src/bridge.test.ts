@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Bridge, localWsUrlFor, coalesceOutputFrames } from './bridge.js';
+import { AGENT_EVENT } from './agent/frames.js';
 import * as crypto from './crypto.js';
 
 const MSG_HANDSHAKE = 0x01;
@@ -453,4 +454,55 @@ test('sendAgentFrame: encrypts an agent frame to one phone', () => {
   assert.equal(inner[0], 0x61);
   assert.deepEqual(JSON.parse(inner.subarray(1).toString()), { sessions: [] });
   bridge.stop();
+});
+
+test('AGENT_ATTACH: logs a parseable [agent] line', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (m: string) => { lines.push(m); };
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x62]),
+    Buffer.from(JSON.stringify({ agent: 'claude', sessionId: 's1', sinceSeq: 7 })),
+  ]));
+
+  console.log = orig;
+  bridge.stop();
+
+  assert.ok(lines.some((l) => l.startsWith('[agent] -> conn=1 agent=claude session=s1 type=attach sinceSeq=7')),
+    `expected an attach log line, got: ${lines.join('\n')}`);
+});
+
+test('TERMINAL_ATTACH: logs an [attach] decision line', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (m: string) => { lines.push(m); };
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x57]),
+    Buffer.from(JSON.stringify({ kind: 'herdr', name: 'work' })),
+  ]));
+
+  console.log = orig;
+  bridge.stop();
+
+  assert.ok(lines.some((l) => l.startsWith('[attach] conn=1 target=herdr:work mux=herdr')),
+    `expected an attach decision line, got: ${lines.join('\n')}`);
+});
+
+test('sendAgentFrame: logs server→phone events', () => {
+  const { bridge, sendInner } = makeBridgeWithSession();
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (m: string) => { lines.push(m); };
+
+  bridge.sendAgentFrame(1, AGENT_EVENT, { kind: 'status', sessionId: 's1', seq: -1, status: 'error', detail: 'boom' });
+
+  console.log = orig;
+  bridge.stop();
+
+  assert.ok(lines.some((l) => l.startsWith('[agent] <- conn=1 session=s1 type=status value=error') && l.includes('detail=boom')),
+    `expected a status log line, got: ${lines.join('\n')}`);
 });

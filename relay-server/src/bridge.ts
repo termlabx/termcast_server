@@ -8,6 +8,7 @@ import type { TerminalTarget } from './terminal-targets.js';
 import {
   AGENT_LIST, AGENT_ATTACH, AGENT_DETACH, AGENT_HISTORY,
   AGENT_SEND, AGENT_INTERRUPT, AGENT_PERMISSION, AGENT_QUESTION,
+  AGENT_EVENT, AGENT_SESSIONS,
   decodeAgentFrame, encodeAgentFrame, isAgentOpcode,
 } from './agent/frames.js';
 
@@ -103,6 +104,18 @@ interface ClientSession {
   outFrames: Buffer[]; // ttyd→relay frames buffered for the next coalesced flush
   flushScheduled: boolean; // a setImmediate flush is already armed for outFrames
   attachTarget: TerminalTarget | null; // multiplexer session this terminal attaches to, or null
+}
+
+/** One parseable [agent] log line; the desktop tray parses these (see
+ *  relay-desktop/src/server-agent-log-parser.ts). Values with whitespace or
+ *  quotes are JSON-quoted so a parser can split on `key=value` tokens. */
+function agentLog(dir: '->' | '<-', fields: Record<string, unknown>): void {
+  const parts = Object.entries(fields).map(([k, v]) => {
+    if (v === null) return `${k}=null`;
+    if (typeof v === 'string' && /[\s"]/.test(v)) return `${k}=${JSON.stringify(v)}`;
+    return `${k}=${v}`;
+  });
+  console.log(`[agent] ${dir} ${parts.join(' ')}`);
 }
 
 export class Bridge extends EventEmitter {
@@ -324,6 +337,8 @@ export class Bridge extends EventEmitter {
     } else {
       return; // unrecognised target shape
     }
+    agentLog('->', { conn: session.connId, type: 'attach-terminal', kind, name: session.attachTarget.name });
+    console.log(`[attach] conn=${session.connId} target=${session.attachTarget.id} mux=${session.attachTarget.kind}`);
     this.connectLocal(session);
   }
 
@@ -355,6 +370,7 @@ export class Bridge extends EventEmitter {
 
     switch (frame.opcode) {
       case AGENT_LIST:
+        agentLog('->', { conn: connId, type: 'list' });
         this.emit('agent_list', { connId });
         return;
 
@@ -362,11 +378,13 @@ export class Bridge extends EventEmitter {
         const target = this.readTarget(payload);
         if (!target) return;
         const sinceSeq = typeof payload.sinceSeq === 'number' ? payload.sinceSeq : -1;
+        agentLog('->', { conn: connId, agent: target.agent, session: target.sessionId, type: 'attach', sinceSeq });
         this.emit('agent_attach', { connId, ...target, sinceSeq });
         return;
       }
 
       case AGENT_DETACH:
+        agentLog('->', { conn: connId, type: 'detach' });
         this.emit('agent_detach', { connId });
         return;
 
@@ -375,6 +393,7 @@ export class Bridge extends EventEmitter {
         if (!target) return;
         const beforeSeq = typeof payload.beforeSeq === 'number' ? payload.beforeSeq : null;
         const limit = typeof payload.limit === 'number' ? payload.limit : 50;
+        agentLog('->', { conn: connId, agent: target.agent, session: target.sessionId, type: 'history', beforeSeq, limit });
         this.emit('agent_history', { connId, ...target, beforeSeq, limit });
         return;
       }
@@ -382,6 +401,7 @@ export class Bridge extends EventEmitter {
       case AGENT_SEND: {
         const target = this.readTarget(payload);
         if (!target || typeof payload.text !== 'string') return;
+        agentLog('->', { conn: connId, agent: target.agent, session: target.sessionId, type: 'send', text: payload.text });
         this.emit('agent_send', { connId, ...target, text: payload.text });
         return;
       }
@@ -389,6 +409,7 @@ export class Bridge extends EventEmitter {
       case AGENT_INTERRUPT: {
         const target = this.readTarget(payload);
         if (!target) return;
+        agentLog('->', { conn: connId, agent: target.agent, session: target.sessionId, type: 'interrupt' });
         this.emit('agent_interrupt', { connId, ...target });
         return;
       }
@@ -397,6 +418,7 @@ export class Bridge extends EventEmitter {
         const { requestId, behavior } = payload;
         if (typeof requestId !== 'string') return;
         if (behavior !== 'allow' && behavior !== 'deny') return;
+        agentLog('->', { conn: connId, type: 'permission', requestId, behavior });
         this.emit('agent_permission', { connId, requestId, behavior });
         return;
       }
@@ -405,9 +427,12 @@ export class Bridge extends EventEmitter {
         const { requestId, answers, rejected } = payload;
         if (typeof requestId !== 'string') return;
         if (rejected === true) {
+          agentLog('->', { conn: connId, type: 'question', requestId, rejected: true });
           this.emit('agent_question', { connId, requestId, rejected: true });
         } else if (Array.isArray(answers)) {
-          this.emit('agent_question', { connId, requestId, answers: answers.filter((a) => typeof a === 'string') });
+          const clean = answers.filter((a) => typeof a === 'string');
+          agentLog('->', { conn: connId, type: 'question', requestId, answers: clean });
+          this.emit('agent_question', { connId, requestId, answers: clean });
         }
         return;
       }
@@ -434,6 +459,33 @@ export class Bridge extends EventEmitter {
       this.relay.send(MSG_DATA, connId, crypto.encrypt(encodeAgentFrame(opcode, payload), key));
     } catch (err) {
       console.error('[bridge] agent frame send failed:', (err as Error).message);
+    }
+    if (opcode === AGENT_EVENT || opcode === AGENT_SESSIONS) {
+      const ev = payload as Record<string, unknown>;
+      const kind = ev.kind ?? (opcode === AGENT_SESSIONS ? 'sessions' : 'event');
+      const fields: Record<string, unknown> = { conn: connId };
+      if (typeof ev.sessionId === 'string') fields.session = ev.sessionId;
+      fields.type = kind;
+      if (ev.kind === 'status') {
+        fields.value = ev.status;
+        if (typeof ev.detail === 'string') fields.detail = ev.detail;
+      } else if (ev.kind === 'message') {
+        fields.seq = ev.seq;
+      } else if (ev.kind === 'delta') {
+        fields.messageId = ev.messageId;
+        if (typeof ev.text === 'string') fields.text = ev.text;
+      } else if (ev.kind === 'history') {
+        fields.count = Array.isArray(ev.messages) ? ev.messages.length : 0;
+      } else if (ev.kind === 'permission' && ev.request) {
+        fields.requestId = (ev.request as Record<string, unknown>).requestId;
+      } else if (ev.kind === 'question' && ev.request) {
+        const r = ev.request as Record<string, unknown>;
+        fields.requestId = r.requestId;
+        if (typeof r.prompt === 'string') fields.prompt = r.prompt;
+      } else if (opcode === AGENT_SESSIONS) {
+        fields.count = Array.isArray(ev.sessions) ? ev.sessions.length : 0;
+      }
+      agentLog('<-', fields);
     }
   }
 
