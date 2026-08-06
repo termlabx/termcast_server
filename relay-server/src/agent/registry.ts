@@ -1,8 +1,7 @@
 import type { AgentAdapter, AgentEvent, HistoryPage, Unsubscribe } from './adapter.js';
 import type { AgentKind, AgentSessionSummary } from './types.js';
 import { SessionLiveness } from './session-liveness.js';
-import { deskRegistryFor, type DeskRegistry } from './desk-target.js';
-import { activeMultiplexer } from '../multiplexer.js';
+import { defaultDeskRegistry, type DeskRegistry } from './desk-target.js';
 
 /**
  * Fans requests out across the installed adapters and routes by (agent, id).
@@ -26,7 +25,7 @@ export class AgentRegistry {
 
   constructor(adapters: AgentAdapter[] | (() => AgentAdapter[]), deps: AgentRegistryDeps = {}) {
     this.adapters = adapters;
-    this.desk = deps.desk ?? deskRegistryFor(activeMultiplexer());
+    this.desk = deps.desk ?? defaultDeskRegistry();
     this.liveness = deps.liveness ?? new SessionLiveness();
   }
 

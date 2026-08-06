@@ -104,8 +104,58 @@ export class EmptyDeskRegistry implements DeskRegistry {
   async list(): Promise<DeskEntry[]> { return []; }
 }
 
+/**
+ * Every multiplexer at once, first match wins.
+ *
+ * A machine runs one multiplexer for the *phone's* terminals, but the user's
+ * agents sit wherever they were started — this very machine runs herdr inside
+ * tmux, so both hold live claude sessions. Asking only the configured one is
+ * what made a tmux-hosted session look unreachable: the send found no target,
+ * decided nothing held the session, and answered headlessly while the pane the
+ * user was watching showed nothing.
+ *
+ * One registry failing (herdr's server down, say) must not hide the other's
+ * sessions, so each is isolated.
+ */
+export class CompositeDeskRegistry implements DeskRegistry {
+  constructor(private readonly registries: readonly DeskRegistry[]) {}
+
+  async lookup(agent: AgentKind, sessionId: string): Promise<DeskTarget | null> {
+    for (const registry of this.registries) {
+      const target = await registry.lookup(agent, sessionId).catch(() => null);
+      if (target) return target;
+    }
+    return null;
+  }
+
+  async list(): Promise<DeskEntry[]> {
+    const seen = new Set<string>();
+    const out: DeskEntry[] = [];
+    for (const registry of this.registries) {
+      for (const entry of await registry.list().catch((): DeskEntry[] => [])) {
+        const key = `${entry.agent} ${entry.sessionId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(entry);
+      }
+    }
+    return out;
+  }
+}
+
+/** Single-multiplexer selection. Prefer defaultDeskRegistry outside tests. */
 export function deskRegistryFor(mux: Multiplexer): DeskRegistry {
   if (mux === 'herdr') return new HerdrDeskRegistry();
   if (mux === 'tmux') return new TmuxDeskRegistry();
   return new EmptyDeskRegistry();
+}
+
+/**
+ * What production uses. herdr comes first because it reports a real
+ * `agent_status`, so when both know a session the one with a usable busy signal
+ * wins. The configured multiplexer deliberately plays no part: it governs how
+ * termcast spawns a phone's terminal, not where the user opened their agent.
+ */
+export function defaultDeskRegistry(): DeskRegistry {
+  return new CompositeDeskRegistry([new HerdrDeskRegistry(), new TmuxDeskRegistry()]);
 }

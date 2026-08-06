@@ -4,8 +4,7 @@ import type { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEventStream } from './opencode-event-stream.js';
 import { HerdrAgentCli } from './herdr-agent-cli.js';
 import { SessionLiveness } from './session-liveness.js';
-import { deskRegistryFor, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
-import { activeMultiplexer } from '../multiplexer.js';
+import { defaultDeskRegistry, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
 import { injectPrompt, waitUntilSettled } from './desk-inject.js';
 
 /** Thrown by capabilities not yet built, so a caller never mistakes a no-op for success. */
@@ -50,7 +49,7 @@ export class OpencodeAdapter implements AgentAdapter {
     deps: OpencodeAdapterDeps = {},
   ) {
     const cli = deps.cli ?? new HerdrAgentCli();
-    this.desk = deps.desk ?? deskRegistryFor(activeMultiplexer());
+    this.desk = deps.desk ?? defaultDeskRegistry();
     this.liveness = deps.liveness ?? new SessionLiveness();
     this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
     this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));

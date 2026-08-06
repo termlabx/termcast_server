@@ -7,8 +7,7 @@ import { readMessagesSince, TranscriptTail } from './claude-tail.js';
 import { ClaudeSdkSession } from './claude-sdk-session.js';
 import { HerdrAgentCli } from './herdr-agent-cli.js';
 import { SessionLiveness } from './session-liveness.js';
-import { deskRegistryFor, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
-import { activeMultiplexer } from '../multiplexer.js';
+import { defaultDeskRegistry, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
 import { injectPrompt, waitUntilSettled } from './desk-inject.js';
 
 /** The slice of ClaudeSdkSession the adapter depends on, so tests can substitute it. */
@@ -77,7 +76,7 @@ export class ClaudeAdapter implements AgentAdapter {
     deps: ClaudeAdapterDeps = {},
   ) {
     const cli = deps.cli ?? new HerdrAgentCli();
-    this.desk = deps.desk ?? deskRegistryFor(activeMultiplexer());
+    this.desk = deps.desk ?? defaultDeskRegistry();
     this.liveness = deps.liveness ?? new SessionLiveness();
     this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
     this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));

@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
-import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus, activeMultiplexer } from './multiplexer.js';
+import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
 import { listTerminalTargets } from './terminal-targets.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
 import { AgentRegistry } from './agent/registry.js';
@@ -50,7 +50,7 @@ import { OpencodeServer } from './agent/opencode-server.js';
 import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
 import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
 import { PermissionBroker } from './agent/permission-broker.js';
-import { deskRegistryFor } from './agent/desk-target.js';
+import { defaultDeskRegistry } from './agent/desk-target.js';
 import { SessionLiveness } from './agent/session-liveness.js';
 import type { AgentAdapter, AgentEvent } from './agent/adapter.js';
 import type { AgentKind } from './agent/types.js';
@@ -626,9 +626,10 @@ program
     let opencodeAdapter: OpencodeAdapter | null = null;
     let opencodeUrl: string | null = null;
 
-    // One registry and one liveness oracle for the whole process: both cache,
-    // and a session listing asks them about every session at once.
-    const deskRegistry = deskRegistryFor(activeMultiplexer());
+    // One desk registry and one liveness oracle for the whole process: a
+    // session listing asks them about every session at once, and the liveness
+    // oracle caches its process scan across those calls.
+    const deskRegistry = defaultDeskRegistry();
     const liveness = new SessionLiveness();
 
     const claudeAdapter = new ClaudeAdapter(undefined, { desk: deskRegistry, liveness });
