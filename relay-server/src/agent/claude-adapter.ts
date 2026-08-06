@@ -58,6 +58,7 @@ export async function paneIsIdle(paneId: string): Promise<boolean> {
 
 export type Injector = (paneId: string, text: string) => Promise<boolean>;
 export type LiveLookup = () => LiveSession[];
+export type IdleSampler = (paneId: string) => Promise<boolean>;
 
 /** The slice of ClaudeSdkSession the adapter depends on, so tests can substitute it. */
 export interface SdkSessionLike {
@@ -108,6 +109,7 @@ export class ClaudeAdapter implements AgentAdapter {
   private eventSink: ((event: AgentEvent) => void) | null = null;
   private liveLookup: LiveLookup = () => readLiveSessions();
   private idleWaiter: (sample: () => Promise<boolean>, opts?: IdleWaitOptions) => Promise<void> = waitForIdle;
+  private idleSampler: IdleSampler = (paneId) => paneIsIdle(paneId);
   private injector: Injector = async (paneId, text) => {
     if (!(await paneIsIdle(paneId))) return false;
     const command = sendKeysCommand(paneId, text, 'tmux');
@@ -134,6 +136,11 @@ export class ClaudeAdapter implements AgentAdapter {
   /** Test seam. Production waits on the real tmux pane state. */
   setIdleWaiter(waiter: (sample: () => Promise<boolean>, opts?: IdleWaitOptions) => Promise<void>): void {
     this.idleWaiter = waiter;
+  }
+
+  /** Test seam. Production probes the real tmux pane. */
+  setIdleSampler(sampler: IdleSampler): void {
+    this.idleSampler = sampler;
   }
 
   /** Where SDK-originated events go, since they have no transcript to tail. */
@@ -206,7 +213,7 @@ export class ClaudeAdapter implements AgentAdapter {
       this.eventSink?.({ kind: 'status', sessionId, seq: -1, status: 'turn_end' });
     };
     try {
-      await this.idleWaiter(() => paneIsIdle(paneId));
+      await this.idleWaiter(() => this.idleSampler(paneId));
       turnEnd();
     } catch {
       // tmux gone or unreadable — end the turn rather than leave the phone stuck.
