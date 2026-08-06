@@ -43,17 +43,47 @@ export async function waitForIdle(
   }
 }
 
-/** Returns false when the pane already has typed input we would interleave with. */
-export async function paneIsIdle(paneId: string): Promise<boolean> {
+/** One reading of a pane: whether it is in copy mode, and what it is showing. */
+export type PaneProbe = (paneId: string) => Promise<{ inMode: boolean; content: string } | null>;
+
+const tmuxProbe: PaneProbe = async (paneId) => {
+  const id = paneId.replace(/'/g, '');
   try {
-    const { stdout } = await run(`tmux display-message -p -t '${paneId.replace(/'/g, '')}' '#{pane_in_mode}:#{cursor_x}'`);
-    const [inMode, cursorX] = stdout.trim().split(':');
-    // A non-zero cursor column means a partially typed line is sitting there.
-    return inMode === '0' && cursorX === '0';
+    const [mode, content] = await Promise.all([
+      run(`tmux display-message -p -t '${id}' '#{pane_in_mode}'`),
+      run(`tmux capture-pane -p -t '${id}'`),
+    ]);
+    return { inMode: mode.stdout.trim() !== '0', content: content.stdout };
   } catch {
-    // Cannot tell — assume idle rather than blocking the phone entirely.
-    return true;
+    return null;
   }
+};
+
+/**
+ * Whether the pane has settled — nothing repainting, no scrollback view open.
+ *
+ * Two captures a beat apart: a working agent animates a spinner and streams
+ * tokens, so its pane differs between them, while a pane parked at its prompt
+ * is byte-identical. This deliberately does not look at the cursor column. A
+ * TUI parks its cursor inside an input box (a real pane here read `cursor_x=38`
+ * while working and `11` while idle), so the old `cursor_x == 0` test read
+ * "busy" for every agent pane in existence: sends were refused as "busy at the
+ * desk" and turn_end only fired at the 10-minute bound, which is what left the
+ * phone showing "Working…" indefinitely.
+ */
+export async function paneIsIdle(
+  paneId: string,
+  probe: PaneProbe = tmuxProbe,
+  gapMs = 400,
+): Promise<boolean> {
+  const first = await probe(paneId);
+  // Cannot tell — assume idle rather than blocking the phone entirely.
+  if (!first) return true;
+  if (first.inMode) return false;
+  await sleep(gapMs);
+  const second = await probe(paneId);
+  if (!second) return true;
+  return !second.inMode && second.content === first.content;
 }
 
 export type Injector = (paneId: string, text: string) => Promise<boolean>;
@@ -184,7 +214,7 @@ export class ClaudeAdapter implements AgentAdapter {
     // pane rather than starting a second agent against the same repo.
     if (live?.paneId) {
       const delivered = await this.injector(live.paneId, text);
-      if (!delivered) throw new Error('That session is busy at the desk — someone is typing in it.');
+      if (!delivered) throw new Error('That session is busy at the desk — it is still working or scrolled back.');
       // The transcript tail streams the reply, but it never announces the end of
       // a turn — the phone's "Working" indicator would stick forever. Emit
       // turn_end once the pane returns to idle (Claude Code back at its prompt).

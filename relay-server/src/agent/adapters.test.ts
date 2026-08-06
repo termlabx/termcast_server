@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaudeAdapter, waitForIdle } from './claude-adapter.js';
+import { ClaudeAdapter, waitForIdle, paneIsIdle, type PaneProbe } from './claude-adapter.js';
 import { OpencodeAdapter, AgentUnsupportedError } from './opencode-adapter.js';
 import { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEvent, OpencodeEventStream } from './opencode-event-stream.js';
@@ -170,6 +170,37 @@ test('ClaudeAdapter.send: a busy pane reports rather than interleaving with the 
   adapter.setInjector(async () => false);
 
   await assert.rejects(() => adapter.send('s1', 'hello'), /busy/i);
+});
+
+/** Two-sample pane probe: each call returns the next scripted frame. */
+const scriptedProbe = (frames: (string | null)[], inMode = false): PaneProbe => {
+  let call = 0;
+  return async () => {
+    const content = frames[Math.min(call++, frames.length - 1)];
+    return content === null ? null : { inMode, content };
+  };
+};
+
+test('paneIsIdle: a repainting pane is busy', async () => {
+  // A working agent animates a spinner and streams tokens, so two captures a
+  // beat apart differ. This is the signal `cursor_x == 0` never gave us: every
+  // TUI parks its cursor inside an input box, so the old probe read "busy"
+  // forever and the phone's Working spinner only cleared at the 10 min bound.
+  const busy = ['✽ Nucleating… (8m 40s · ↓ 33.2k tokens)', '· Nucleating… (8m 41s · ↓ 33.3k tokens)'];
+  assert.equal(await paneIsIdle('%0', scriptedProbe(busy), 0), false);
+});
+
+test('paneIsIdle: a settled pane is idle even with the cursor mid-line', async () => {
+  const settled = ['│ > Try "how does X work?"                    │'];
+  assert.equal(await paneIsIdle('%1', scriptedProbe(settled), 0), true);
+});
+
+test('paneIsIdle: a pane in copy mode is busy, so we never inject into a scrollback view', async () => {
+  assert.equal(await paneIsIdle('%2', scriptedProbe(['same'], true), 0), false);
+});
+
+test('paneIsIdle: an unreadable pane reads idle rather than blocking the phone', async () => {
+  assert.equal(await paneIsIdle('%9', scriptedProbe([null]), 0), true);
 });
 
 test('waitForIdle: requires two consecutive idle reads, so a blink does not end the turn', async () => {
