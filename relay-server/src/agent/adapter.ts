@@ -19,7 +19,10 @@ export type PermissionBehavior = 'allow' | 'deny';
 
 export type AgentEvent =
   | { kind: 'message'; sessionId: string; seq: number; message: AgentMessage }
-  | { kind: 'delta'; sessionId: string; messageId: string; text: string }
+  // `replace` marks a delta that carries the whole current text rather than an
+  // increment (the TUI draft is re-read in full on every poll). Optional, so
+  // older phones that ignore it keep the append behaviour they always had.
+  | { kind: 'delta'; sessionId: string; messageId: string; text: string; replace?: boolean }
   | { kind: 'status'; sessionId: string; seq: number; status: 'turn_start' | 'turn_end' | 'ended' | 'error'; detail?: string }
   | { kind: 'permission'; sessionId: string; seq: number; request: AgentPermissionRequest }
   | { kind: 'question'; sessionId: string; seq: number; request: AgentQuestionInfo }
