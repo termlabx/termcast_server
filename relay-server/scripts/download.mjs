@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 
 // Public download host fronting the release assets. Override with
 // TERMCAST_RELEASES_URL to self-host.
-export const DEFAULT_BASE_URL = 'https://termcast.download.ulixlab.com';
+export const DEFAULT_BASE_URL = 'https://ttyd-relay.xing-mathcoder.workers.dev';
 
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux']);
 const SUPPORTED_ARCHS = new Set(['x64', 'arm64']);

