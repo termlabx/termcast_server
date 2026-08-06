@@ -2,6 +2,11 @@ import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubsc
 import type { AgentMessage, AgentSessionSummary, AgentQuestionInfo, MessageBlock } from './types.js';
 import type { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEventStream } from './opencode-event-stream.js';
+import { HerdrAgentCli } from './herdr-agent-cli.js';
+import { SessionLiveness } from './session-liveness.js';
+import { deskRegistryFor, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
+import { activeMultiplexer } from '../multiplexer.js';
+import { injectPrompt, waitUntilSettled } from './desk-inject.js';
 
 /** Thrown by capabilities not yet built, so a caller never mistakes a no-op for success. */
 export class AgentUnsupportedError extends Error {
@@ -22,15 +27,42 @@ const DELTA_FLUSH_MS = 100;
 const QUESTION_RETRY_ATTEMPTS = 3;
 const QUESTION_RETRY_DELAY_MS = 500;
 
+export interface OpencodeAdapterDeps {
+  desk?: DeskRegistry;
+  liveness?: SessionLiveness;
+  cli?: HerdrAgentCli;
+  inject?: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
+  watchStatus?: (target: DeskTarget) => Promise<void>;
+}
+
 export class OpencodeAdapter implements AgentAdapter {
   readonly kind = 'opencode' as const;
+
+  private readonly desk: DeskRegistry;
+  private readonly liveness: SessionLiveness;
+  private readonly inject: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
+  private readonly watchStatus: (target: DeskTarget) => Promise<void>;
+  private eventSink: ((event: AgentEvent) => void) | null = null;
 
   constructor(
     private readonly client: OpencodeClient,
     private readonly eventStream?: OpencodeEventStream,
-  ) {}
+    deps: OpencodeAdapterDeps = {},
+  ) {
+    const cli = deps.cli ?? new HerdrAgentCli();
+    this.desk = deps.desk ?? deskRegistryFor(activeMultiplexer());
+    this.liveness = deps.liveness ?? new SessionLiveness();
+    this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
+    this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));
+  }
 
-  list(): Promise<AgentSessionSummary[]> {
+  /** Where desk-send turn ends go; the transcript tail cannot announce them. */
+  setEventSink(sink: (event: AgentEvent) => void): void {
+    this.eventSink = sink;
+  }
+
+  /** async so a client that throws synchronously still yields a rejected promise. */
+  async list(): Promise<AgentSessionSummary[]> {
     return this.client.listSessions();
   }
 
@@ -233,8 +265,45 @@ export class OpencodeAdapter implements AgentAdapter {
     };
   }
 
-  send(sessionId: string, text: string): Promise<void> {
+  /**
+   * Deliver a message to wherever the user will actually see it.
+   *
+   * The HTTP API is headless: a prompt posted to termcastd's `opencode serve`
+   * is promoted and executed by that process, and an opencode TUI attached to
+   * the same session never renders it (measured — see the design doc). So a
+   * reachable session is driven through its pane, and a live-but-unreachable
+   * one is refused rather than answered behind the TUI's back.
+   */
+  async send(sessionId: string, text: string): Promise<void> {
+    const target = await this.desk.lookup('opencode', sessionId);
+    if (target) {
+      if (!isInjectable(target.status)) {
+        throw new Error('That session is busy at the desk — it is still working or waiting on you.');
+      }
+      await this.inject(target.paneId, text, target.mux);
+      void this.watchUntilSettled(sessionId, target);
+      return;
+    }
+
+    const summaries = await this.list().catch((): AgentSessionSummary[] => []);
+    const projectPath = summaries.find((s) => s.id === sessionId)?.projectPath ?? '';
+    if (await this.liveness.isAlive('opencode', sessionId, projectPath)) {
+      throw new Error(
+        'That session is open in a terminal on your Mac that cannot be mirrored. ' +
+        'Reopen it inside your multiplexer to chat from here.',
+      );
+    }
+
     return this.client.sendMessage(sessionId, text);
+  }
+
+  private async watchUntilSettled(sessionId: string, target: DeskTarget): Promise<void> {
+    try {
+      await this.watchStatus(target);
+    } catch {
+      // Multiplexer gone — end the turn rather than pin the phone on Working.
+    }
+    this.eventSink?.({ kind: 'status', sessionId, seq: -1, status: 'turn_end' });
   }
 
   interrupt(sessionId: string): Promise<void> {

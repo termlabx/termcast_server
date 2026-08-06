@@ -666,3 +666,60 @@ test('claude send: resumes headlessly when nothing holds the session', async () 
 
   assert.deepEqual(sent, ['hello123']);
 });
+
+const stubClient = (sink: { sent: Array<[string, string]> }) => ({
+  sendMessage: async (id: string, text: string) => { sink.sent.push([id, text]); },
+}) as unknown as ConstructorParameters<typeof OpencodeAdapter>[0];
+
+test('opencode send: injects into the desk pane instead of posting headlessly', async () => {
+  const posted = { sent: [] as Array<[string, string]> };
+  const injected: Array<{ paneId: string; text: string }> = [];
+  const adapter = new OpencodeAdapter(stubClient(posted), undefined, {
+    desk: deskWith({ paneId: 'w3:p1', mux: 'herdr', status: 'idle' }),
+    liveness: livenessOf(true),
+    inject: async (paneId, text) => { injected.push({ paneId, text }); },
+    watchStatus: async () => {},
+  });
+
+  await adapter.send('ses_1', 'hello123');
+
+  assert.deepEqual(injected, [{ paneId: 'w3:p1', text: 'hello123' }]);
+  assert.deepEqual(posted.sent, [], 'must not also post the prompt headlessly');
+});
+
+test('opencode send: refuses while the desk agent is working', async () => {
+  const posted = { sent: [] as Array<[string, string]> };
+  const adapter = new OpencodeAdapter(stubClient(posted), undefined, {
+    desk: deskWith({ paneId: 'w3:p1', mux: 'herdr', status: 'working' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('must not inject'); },
+  });
+
+  await assert.rejects(() => adapter.send('ses_1', 'hello123'), /busy at the desk/);
+  assert.deepEqual(posted.sent, []);
+});
+
+test('opencode send: refuses rather than posting when alive but unreachable', async () => {
+  const posted = { sent: [] as Array<[string, string]> };
+  const adapter = new OpencodeAdapter(stubClient(posted), undefined, {
+    desk: deskWith(null),
+    liveness: livenessOf(true),
+    inject: async () => {},
+  });
+
+  await assert.rejects(() => adapter.send('ses_1', 'hello123'), /open in a terminal/);
+  assert.deepEqual(posted.sent, [], 'a live TUI must not be bypassed by a headless post');
+});
+
+test('opencode send: posts headlessly when nothing holds the session', async () => {
+  const posted = { sent: [] as Array<[string, string]> };
+  const adapter = new OpencodeAdapter(stubClient(posted), undefined, {
+    desk: deskWith(null),
+    liveness: livenessOf(false),
+    inject: async () => {},
+  });
+
+  await adapter.send('ses_1', 'hello123');
+
+  assert.deepEqual(posted.sent, [['ses_1', 'hello123']]);
+});
