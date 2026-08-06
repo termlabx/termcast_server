@@ -9,6 +9,11 @@ import { readMessagesSince, TranscriptTail } from './claude-tail.js';
 import { ClaudeSdkSession } from './claude-sdk-session.js';
 import { readLiveSessions, type LiveSession } from './session-registry.js';
 import { sendKeysCommand } from '../multiplexer.js';
+import { HerdrAgentCli } from './herdr-agent-cli.js';
+import { SessionLiveness } from './session-liveness.js';
+import { deskRegistryFor, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
+import { activeMultiplexer } from '../multiplexer.js';
+import { injectPrompt, waitUntilSettled } from './desk-inject.js';
 
 const run = promisify(exec);
 
@@ -128,49 +133,48 @@ export async function transcriptPathFor(projectsRoot: string, sessionId: string)
   return null;
 }
 
+export interface ClaudeAdapterDeps {
+  desk?: DeskRegistry;
+  liveness?: SessionLiveness;
+  cli?: HerdrAgentCli;
+  inject?: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
+  watchStatus?: (target: DeskTarget) => Promise<void>;
+}
+
 export class ClaudeAdapter implements AgentAdapter {
   readonly kind = 'claude' as const;
-
-  constructor(private readonly projectsRoot: string = defaultProjectsRoot()) {}
 
   private readonly sdkSessions = new Map<string, SdkSessionLike>();
   private sessionFactory: SdkSessionFactory =
     (sessionId, cwd) => new ClaudeSdkSession(sessionId, cwd);
   private eventSink: ((event: AgentEvent) => void) | null = null;
-  private liveLookup: LiveLookup = () => readLiveSessions();
-  private idleWaiter: (sample: () => Promise<boolean>, opts?: IdleWaitOptions) => Promise<void> = waitForIdle;
-  private idleSampler: IdleSampler = (paneId) => paneIsIdle(paneId);
-  private injector: Injector = async (paneId, text) => {
-    if (!(await paneIsIdle(paneId))) return false;
-    const command = sendKeysCommand(paneId, text, 'tmux');
-    if (!command) return false;
-    await run(command);
-    return true;
-  };
+  private transcriptLookup: (sessionId: string) => Promise<string | null> =
+    (sessionId) => transcriptPathFor(this.projectsRoot, sessionId);
+
+  private readonly desk: DeskRegistry;
+  private readonly liveness: SessionLiveness;
+  private readonly inject: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
+  private readonly watchStatus: (target: DeskTarget) => Promise<void>;
+
+  constructor(
+    private readonly projectsRoot: string = defaultProjectsRoot(),
+    deps: ClaudeAdapterDeps = {},
+  ) {
+    const cli = deps.cli ?? new HerdrAgentCli();
+    this.desk = deps.desk ?? deskRegistryFor(activeMultiplexer());
+    this.liveness = deps.liveness ?? new SessionLiveness();
+    this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
+    this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));
+  }
 
   /** Test seam. Production uses the default ClaudeSdkSession factory. */
   setSessionFactory(factory: SdkSessionFactory): void {
     this.sessionFactory = factory;
   }
 
-  /** Test seam. Production uses the real session registry. */
-  setLiveLookup(lookup: LiveLookup): void {
-    this.liveLookup = lookup;
-  }
-
-  /** Test seam. Production injects into tmux with an idle-input guard. */
-  setInjector(injector: Injector): void {
-    this.injector = injector;
-  }
-
-  /** Test seam. Production waits on the real tmux pane state. */
-  setIdleWaiter(waiter: (sample: () => Promise<boolean>, opts?: IdleWaitOptions) => Promise<void>): void {
-    this.idleWaiter = waiter;
-  }
-
-  /** Test seam. Production probes the real tmux pane. */
-  setIdleSampler(sampler: IdleSampler): void {
-    this.idleSampler = sampler;
+  /** Test seam. Production scans the projects root for the transcript. */
+  setTranscriptLookup(lookup: (sessionId: string) => Promise<string | null>): void {
+    this.transcriptLookup = lookup;
   }
 
   /** Where SDK-originated events go, since they have no transcript to tail. */
@@ -208,28 +212,40 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async send(sessionId: string, text: string): Promise<void> {
-    const live = this.liveLookup().find((entry) => entry.sessionId === sessionId);
+    const target = await this.desk.lookup('claude', sessionId);
 
-    // A live session belongs to whoever is sitting at the desk: drive the real
-    // pane rather than starting a second agent against the same repo.
-    if (live?.paneId) {
-      const delivered = await this.injector(live.paneId, text);
-      if (!delivered) throw new Error('That session is busy at the desk — it is still working or scrolled back.');
-      // The transcript tail streams the reply, but it never announces the end of
-      // a turn — the phone's "Working" indicator would stick forever. Emit
-      // turn_end once the pane returns to idle (Claude Code back at its prompt).
-      void this.watchUntilIdle(sessionId, live.paneId);
+    // A session that is reachable belongs to whoever is at the desk: drive the
+    // real pane rather than starting a second agent against the same repo.
+    if (target) {
+      if (!isInjectable(target.status)) {
+        throw new Error('That session is busy at the desk — it is still working or waiting on you.');
+      }
+      await this.inject(target.paneId, text, target.mux);
+      // The transcript tail streams the reply but never announces the end of a
+      // turn, so the phone's Working indicator would stick forever. Whatever
+      // raised turn_start owns emitting the end.
+      void this.watchUntilSettled(sessionId, target);
       return;
+    }
+
+    // Unreachable but running: refusing is the point of this path. A headless
+    // resume here would answer on the phone while the terminal the user is
+    // looking at shows nothing, and the two contexts would diverge.
+    const summaries = await this.list();
+    const summary = summaries.find((s) => s.id === sessionId);
+    if (await this.liveness.isAlive('claude', sessionId, summary?.projectPath ?? '')) {
+      throw new Error(
+        'That session is open in a terminal on your Mac that cannot be mirrored. ' +
+        'Reopen it inside your multiplexer to chat from here.',
+      );
     }
 
     let session = this.sdkSessions.get(sessionId);
     if (!session) {
-      const path = await transcriptPathFor(this.projectsRoot, sessionId);
+      const path = await this.transcriptLookup(sessionId);
       if (!path) throw new Error(`unknown claude session: ${sessionId}`);
 
-      const summaries = await this.list();
-      const cwd = summaries.find((s) => s.id === sessionId)?.projectPath || process.cwd();
-
+      const cwd = summary?.projectPath || process.cwd();
       session = this.sessionFactory(sessionId, cwd);
       session.onEvent((event) => this.eventSink?.(event));
       this.sdkSessions.set(sessionId, session);
@@ -238,17 +254,14 @@ export class ClaudeAdapter implements AgentAdapter {
     session.send(text);
   }
 
-  private async watchUntilIdle(sessionId: string, paneId: string): Promise<void> {
-    const turnEnd = (): void => {
-      this.eventSink?.({ kind: 'status', sessionId, seq: -1, status: 'turn_end' });
-    };
+  private async watchUntilSettled(sessionId: string, target: DeskTarget): Promise<void> {
     try {
-      await this.idleWaiter(() => this.idleSampler(paneId));
-      turnEnd();
+      await this.watchStatus(target);
     } catch {
-      // tmux gone or unreadable — end the turn rather than leave the phone stuck.
-      turnEnd();
+      // Multiplexer gone or unreadable — end the turn rather than leave the
+      // phone stuck on Working.
     }
+    this.eventSink?.({ kind: 'status', sessionId, seq: -1, status: 'turn_end' });
   }
 
   async interrupt(sessionId: string): Promise<void> {

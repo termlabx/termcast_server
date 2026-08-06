@@ -9,6 +9,19 @@ import { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEvent, OpencodeEventStream } from './opencode-event-stream.js';
 import type { AgentEvent } from './adapter.js';
 import type { AgentMessage, AgentQuestionInfo } from './types.js';
+import { SessionLiveness } from './session-liveness.js';
+import type { DeskRegistry, DeskTarget, DeskEntry } from './desk-target.js';
+
+const deskWith = (target: DeskTarget | null): DeskRegistry => ({
+  async lookup() { return target; },
+  async list(): Promise<DeskEntry[]> { return []; },
+});
+
+const livenessOf = (alive: boolean): SessionLiveness =>
+  ({ isAlive: async () => alive }) as unknown as SessionLiveness;
+
+/** Nothing at the desk, nothing running: the plain headless-resume world. */
+const headlessDeps = () => ({ desk: deskWith(null), liveness: livenessOf(false), inject: async () => {} });
 
 const line = (text: string) => JSON.stringify({
   type: 'user',
@@ -80,12 +93,12 @@ test('ClaudeAdapter.subscribe: replays messages after sinceSeq then stops on uns
 test('ClaudeAdapter.send: an unknown session reports failure rather than silently dropping', async () => {
   const root = claudeRoot('s1', [line('one')]);
 
-  await assert.rejects(() => new ClaudeAdapter(root).send('nope', 'hi'));
+  await assert.rejects(() => new ClaudeAdapter(root, headlessDeps()).send('nope', 'hi'));
 });
 
 test('ClaudeAdapter.send: a known idle session starts an SDK session and accepts the text', async () => {
   const root = claudeRoot('s1', [line('one')]);
-  const adapter = new ClaudeAdapter(root);
+  const adapter = new ClaudeAdapter(root, headlessDeps());
   const started: string[] = [];
   adapter.setSessionFactory((sessionId) => {
     started.push(sessionId);
@@ -99,7 +112,7 @@ test('ClaudeAdapter.send: a known idle session starts an SDK session and accepts
 
 test('ClaudeAdapter.send: a second message reuses the same SDK session', async () => {
   const root = claudeRoot('s1', [line('one')]);
-  const adapter = new ClaudeAdapter(root);
+  const adapter = new ClaudeAdapter(root, headlessDeps());
   let created = 0;
   adapter.setSessionFactory(() => {
     created += 1;
@@ -112,15 +125,17 @@ test('ClaudeAdapter.send: a second message reuses the same SDK session', async (
   assert.equal(created, 1);
 });
 
-test('ClaudeAdapter.send: a live session injects into its pane instead of starting an SDK session', async () => {
+test('ClaudeAdapter.send: a reachable session injects into its pane instead of starting an SDK session', async () => {
   const root = claudeRoot('s1', [line('one')]);
-  const adapter = new ClaudeAdapter(root);
   const injected: string[] = [];
   let sdkStarted = false;
 
-  adapter.setIdleWaiter(async () => {});
-  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
-  adapter.setInjector(async (paneId, text) => { injected.push(`${paneId}:${text}`); return true; });
+  const adapter = new ClaudeAdapter(root, {
+    desk: deskWith({ paneId: '%3', mux: 'tmux', status: 'unknown' }),
+    liveness: livenessOf(true),
+    inject: async (paneId, text) => { injected.push(`${paneId}:${text}`); },
+    watchStatus: async () => {},
+  });
   adapter.setSessionFactory(() => {
     sdkStarted = true;
     return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
@@ -132,28 +147,18 @@ test('ClaudeAdapter.send: a live session injects into its pane instead of starti
   assert.equal(sdkStarted, false);
 });
 
-test('ClaudeAdapter.send: a live session ends the turn once its pane is idle again', async () => {
+test('ClaudeAdapter.send: a desk send ends the turn once the pane settles', async () => {
   const root = claudeRoot('s1', [line('one')]);
-  const adapter = new ClaudeAdapter(root);
   const statuses: string[] = [];
-  let idleSamples = 0;
 
+  const adapter = new ClaudeAdapter(root, {
+    desk: deskWith({ paneId: '%3', mux: 'tmux', status: 'unknown' }),
+    liveness: livenessOf(true),
+    inject: async () => {},
+    watchStatus: async () => {},
+  });
   adapter.setEventSink((event) => {
     if (event.kind === 'status') statuses.push(event.status);
-  });
-  adapter.setIdleSampler(async () => {
-    idleSamples += 1;
-    return idleSamples >= 2;
-  });
-  adapter.setIdleWaiter(async (sample) => {
-    // Two samples: busy, then idle.
-    await sample();
-    await sample();
-  });
-  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
-  adapter.setInjector(async () => true);
-  adapter.setSessionFactory(() => {
-    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
   });
 
   await adapter.send('s1', 'hello');
@@ -163,11 +168,34 @@ test('ClaudeAdapter.send: a live session ends the turn once its pane is idle aga
   assert.deepEqual(statuses, ['turn_end']);
 });
 
-test('ClaudeAdapter.send: a busy pane reports rather than interleaving with the desk', async () => {
+test('ClaudeAdapter.send: a watcher that throws still ends the turn', async () => {
+  // A vanished multiplexer must not pin the phone on "Working…" forever.
   const root = claudeRoot('s1', [line('one')]);
-  const adapter = new ClaudeAdapter(root);
-  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: '%3' }]);
-  adapter.setInjector(async () => false);
+  const statuses: string[] = [];
+
+  const adapter = new ClaudeAdapter(root, {
+    desk: deskWith({ paneId: '%3', mux: 'tmux', status: 'unknown' }),
+    liveness: livenessOf(true),
+    inject: async () => {},
+    watchStatus: async () => { throw new Error('pane gone'); },
+  });
+  adapter.setEventSink((event) => {
+    if (event.kind === 'status') statuses.push(event.status);
+  });
+
+  await adapter.send('s1', 'hello');
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.deepEqual(statuses, ['turn_end']);
+});
+
+test('ClaudeAdapter.send: a busy desk agent reports rather than interleaving', async () => {
+  const root = claudeRoot('s1', [line('one')]);
+  const adapter = new ClaudeAdapter(root, {
+    desk: deskWith({ paneId: '%3', mux: 'herdr', status: 'working' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('must not inject'); },
+  });
 
   await assert.rejects(() => adapter.send('s1', 'hello'), /busy/i);
 });
@@ -217,13 +245,12 @@ test('waitForIdle: a never-idle pane resolves when the timeout elapses (bounded 
   await waitForIdle(async () => true, { settleMs: 0, pollMs: 5, timeoutMs: 20 });
 });
 
-test('ClaudeAdapter.send: a live session with no pane falls back to the SDK', async () => {
+test('ClaudeAdapter.send: a session nothing holds falls back to the SDK', async () => {
   // multiplexer: none has no injection mechanism at all.
   const root = claudeRoot('s1', [line('one')]);
-  const adapter = new ClaudeAdapter(root);
+  const adapter = new ClaudeAdapter(root, headlessDeps());
   let sdkStarted = false;
 
-  adapter.setLiveLookup(() => [{ sessionId: 's1', cwd: '/repo', transcriptPath: '', pid: process.pid, paneId: null }]);
   adapter.setSessionFactory(() => {
     sdkStarted = true;
     return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false };
@@ -570,4 +597,72 @@ test('OpencodeAdapter.subscribe: an unavailable stream falls back to the poll an
   stop();
 
   assert.ok(client.calls >= 2, 'no stream available → the backstop poll still reads');
+});
+
+test('claude send: injects into the desk pane when the session is idle there', async () => {
+  const injected: Array<{ paneId: string; text: string }> = [];
+  const adapter = new ClaudeAdapter('/projects', {
+    desk: deskWith({ paneId: 'w1:p1', mux: 'herdr', status: 'idle' }),
+    liveness: livenessOf(true),
+    inject: async (paneId, text) => { injected.push({ paneId, text }); },
+  });
+
+  await adapter.send('s1', 'hello123');
+
+  assert.deepEqual(injected, [{ paneId: 'w1:p1', text: 'hello123' }]);
+});
+
+test('claude send: refuses while the desk agent is working', async () => {
+  const adapter = new ClaudeAdapter('/projects', {
+    desk: deskWith({ paneId: 'w1:p1', mux: 'herdr', status: 'working' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('must not inject'); },
+  });
+
+  await assert.rejects(() => adapter.send('s1', 'hello123'), /busy at the desk/);
+});
+
+test('claude send: refuses while the desk agent is blocked on a permission', async () => {
+  const adapter = new ClaudeAdapter('/projects', {
+    desk: deskWith({ paneId: 'w1:p1', mux: 'herdr', status: 'blocked' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('must not inject'); },
+  });
+
+  await assert.rejects(() => adapter.send('s1', 'hello123'), /busy at the desk/);
+});
+
+test('claude send: refuses rather than going headless when alive but unreachable', async () => {
+  let headless = false;
+  const adapter = new ClaudeAdapter('/projects', {
+    desk: deskWith(null),
+    liveness: livenessOf(true),
+    inject: async () => {},
+  });
+  adapter.setSessionFactory(() => {
+    headless = true;
+    return { start: async () => {}, send: () => {}, stop: () => {}, onEvent: () => {},
+             resolvePermission: () => false, resolveQuestion: () => false };
+  });
+
+  await assert.rejects(() => adapter.send('s1', 'hello123'), /open in a terminal/);
+  assert.equal(headless, false);
+});
+
+test('claude send: resumes headlessly when nothing holds the session', async () => {
+  const sent: string[] = [];
+  const adapter = new ClaudeAdapter('/projects', {
+    desk: deskWith(null),
+    liveness: livenessOf(false),
+    inject: async () => {},
+  });
+  adapter.setSessionFactory(() => ({
+    start: async () => {}, send: (t: string) => { sent.push(t); }, stop: () => {},
+    onEvent: () => {}, resolvePermission: () => false, resolveQuestion: () => false,
+  }));
+  adapter.setTranscriptLookup(async () => '/projects/p/s1.jsonl');
+
+  await adapter.send('s1', 'hello123');
+
+  assert.deepEqual(sent, ['hello123']);
 });
