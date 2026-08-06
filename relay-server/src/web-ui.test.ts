@@ -131,14 +131,12 @@ test('GET /api/pairing (no new) displays the current QR without minting or regis
 async function uiWithMultiplexer(active: Multiplexer = 'tmux', installed = { tmux: true, herdr: false }) {
   const ui = new WebUI();
   await ui.start(await freePort());
-  const setCalls: string[] = [];
   const installCalls: string[] = [];
   ui.setMultiplexerHandlers({
     get: () => ({ active, installed }),
-    set: (m) => { setCalls.push(m); },
     install: async (n) => { installCalls.push(n); },
   });
-  return { ui, setCalls, installCalls };
+  return { ui, installCalls };
 }
 
 test('GET /api/multiplexer: reports the active one and what is installed', async () => {
@@ -150,8 +148,10 @@ test('GET /api/multiplexer: reports the active one and what is installed', async
   assert.deepEqual(await resp.json(), { active: 'tmux', installed: { tmux: true, herdr: false } });
 });
 
-test('POST /api/multiplexer: accepts a known name and applies it', async () => {
-  const { ui, setCalls } = await uiWithMultiplexer();
+// The active multiplexer is detected, not set, so the route that used to
+// change it is gone: a stored value is a second source of truth that drifts.
+test('POST /api/multiplexer: refuses explicitly rather than 200-ing the dashboard HTML', async () => {
+  const { ui } = await uiWithMultiplexer();
   after(() => ui.stop());
 
   const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
@@ -159,36 +159,8 @@ test('POST /api/multiplexer: accepts a known name and applies it', async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ multiplexer: 'herdr' }),
   });
-  assert.equal(resp.status, 200);
-  assert.deepEqual(setCalls, ['herdr']);
-});
-
-// Strict membership, not parseMultiplexer's lenient default: a typo must 400,
-// never silently switch the machine to tmux.
-test('POST /api/multiplexer: rejects an unknown multiplexer name', async () => {
-  const { ui, setCalls } = await uiWithMultiplexer();
-  after(() => ui.stop());
-
-  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ multiplexer: 'zellij' }),
-  });
-  assert.equal(resp.status, 400);
-  assert.deepEqual(setCalls, []);
-});
-
-test('POST /api/multiplexer: blocks cross-origin requests like the other mutating routes', async () => {
-  const { ui, setCalls } = await uiWithMultiplexer();
-  after(() => ui.stop());
-
-  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
-    body: JSON.stringify({ multiplexer: 'herdr' }),
-  });
-  assert.equal(resp.status, 403);
-  assert.deepEqual(setCalls, []);
+  assert.equal(resp.status, 405);
+  assert.match((await resp.json() as { error: string }).error, /cannot be set/);
 });
 
 test('POST /api/multiplexer/install: routes the requested binary to the installer', async () => {

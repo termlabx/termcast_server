@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 import { homedir, hostname, platform, userInfo } from 'node:os';
 import { ensureAugmentedIndex } from './ttyd-index.js';
-import { Multiplexer } from './multiplexer.js';
+import { Multiplexer, resolveMultiplexerBinary } from './multiplexer.js';
+// Binary resolution and detection now live with the rest of the multiplexer
+// logic; re-exported here because this is where callers have always found them.
+export { resolveMultiplexerBinary, detectInstalledMultiplexers } from './multiplexer.js';
 import { downloadHerdr, herdrAssetName } from './herdr-install.js';
 import { resolveBaseUrl, releaseUrl } from './upgrade.js';
 
@@ -134,38 +137,6 @@ export function stripNestingEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /**
- * Where an already-present binary might live, in the order start() prefers:
- * bundled with the app, previously downloaded, then system PATH. Download-free,
- * so the settings UI can report installed state without side effects. MUST stay
- * in step with findOrInstallTmux()/findOrInstallHerdr() or the UI will claim
- * something is missing that the wrapper script happily execs.
- */
-export function resolveMultiplexerBinary(mux: 'tmux' | 'herdr'): string | null {
-  const names = mux === 'tmux'
-    ? [`tmux-${process.platform}-${process.arch}`, 'tmux']
-    : ['herdr'];
-  for (const name of names) {
-    for (const p of [
-      join(__dirname, '..', 'bin', name),
-      join(__dirname, '..', '..', 'bin', name),
-      join(homedir(), '.termcast', 'bin', name),
-      // The `curl | sh` installer for herdr (and several brew tap flows) drops
-      // the binary in ~/.local/bin, which is frequently NOT on the PATH the
-      // desktop app/relay process inherits. Resolving it here keeps the
-      // terminal picker working even when `which herdr` fails.
-      join(homedir(), '.local', 'bin', name),
-    ]) {
-      if (existsSync(p)) return p;
-    }
-  }
-  try {
-    const systemPath = execSync(`which ${mux}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (systemPath) return systemPath;
-  } catch {}
-  return null;
-}
-
-/**
  * Fetch the tmux binary for this platform into ~/.termcast/bin. Used by the
  * explicit "Install" action in the settings UI and CLI; start() has its own
  * lazy path. Throws on failure — the caller reports it and keeps the current
@@ -180,14 +151,6 @@ export async function downloadTmux(): Promise<string> {
   mkdirSync(downloadDir, { recursive: true });
   writeFileSync(destPath, Buffer.from(await resp.arrayBuffer()), { mode: 0o755 });
   return destPath;
-}
-
-/** What the settings page and `termcast multiplexer` report as installed. */
-export function detectInstalledMultiplexers(): { tmux: boolean; herdr: boolean } {
-  return {
-    tmux: resolveMultiplexerBinary('tmux') !== null,
-    herdr: resolveMultiplexerBinary('herdr') !== null,
-  };
 }
 
 export class TtydManager extends EventEmitter {

@@ -1,6 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Which terminal multiplexer this machine runs. One at a time, machine-wide —
@@ -17,19 +21,63 @@ export function parseMultiplexer(value: unknown): Multiplexer {
 }
 
 /**
- * The multiplexer this machine is configured to use, read from the sidecar file
- * `start` already maintains for the ttyd wrapper script.
+ * Where a multiplexer binary lives, or null when it is not installed.
  *
- * The agent modules resolve it themselves rather than receiving it, because a
- * `termcast multiplexer` change must take effect on the next send without a
- * restart — a value captured at construction time would go stale.
+ * The bundled per-platform build wins over anything on the PATH, and both
+ * `~/.termcast/bin` and `~/.local/bin` are probed explicitly: the `curl | sh`
+ * installers (herdr's, and several brew tap flows) drop binaries in the latter,
+ * which is frequently NOT on the PATH a desktop-launched relay process
+ * inherits, so `which herdr` alone reports "not installed" on machines that
+ * plainly have it.
  */
-export function activeMultiplexer(): Multiplexer {
-  try {
-    return parseMultiplexer(readFileSync(join(homedir(), '.ttyd-server', 'multiplexer'), 'utf8').trim());
-  } catch {
-    return 'tmux';
+export function resolveMultiplexerBinary(mux: 'tmux' | 'herdr'): string | null {
+  const names = mux === 'tmux'
+    ? [`tmux-${process.platform}-${process.arch}`, 'tmux']
+    : ['herdr'];
+  for (const name of names) {
+    for (const p of [
+      join(__dirname, '..', 'bin', name),
+      join(__dirname, '..', '..', 'bin', name),
+      join(homedir(), '.termcast', 'bin', name),
+      join(homedir(), '.local', 'bin', name),
+    ]) {
+      if (existsSync(p)) return p;
+    }
   }
+  try {
+    const systemPath = execSync(`which ${mux}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (systemPath) return systemPath;
+  } catch {
+    // `which` exits non-zero when the binary is absent.
+  }
+  return null;
+}
+
+export function detectInstalledMultiplexers(): { tmux: boolean; herdr: boolean } {
+  return {
+    tmux: resolveMultiplexerBinary('tmux') !== null,
+    herdr: resolveMultiplexerBinary('herdr') !== null,
+  };
+}
+
+/**
+ * The multiplexer this machine runs, derived entirely from what is installed.
+ *
+ * There is deliberately no stored setting: a configured value is a second
+ * source of truth that drifts from reality, and when it did, a session the user
+ * was looking at became unreachable — the machine said "herdr" while the agent
+ * sat in tmux. Detection cannot disagree with the machine.
+ *
+ * herdr wins when both are present because it is the richer target: it reports
+ * a real per-agent status, which is what lets a send refuse instead of typing
+ * into a busy pane.
+ */
+export function activeMultiplexer(
+  installed: { tmux: boolean; herdr: boolean } = detectInstalledMultiplexers(),
+): Multiplexer {
+  if (installed.herdr) return 'herdr';
+  if (installed.tmux) return 'tmux';
+  return 'none';
 }
 
 /**
@@ -47,19 +95,6 @@ export function sessionPrefix(mux: Multiplexer): string {
  */
 export function sessionNameFor(phoneId: string, mux: Multiplexer = 'tmux'): string {
   return sessionPrefix(mux) + phoneId.replace(/[^A-Za-z0-9_]/g, '_');
-}
-
-/**
- * Resolve the effective multiplexer from stored config plus CLI flags.
- * Precedence: explicit --multiplexer > --no-tmux > stored config > tmux.
- */
-export function multiplexerFromConfig(
-  config: { multiplexer?: unknown },
-  flags: { multiplexer?: unknown; tmux?: boolean } = {},
-): Multiplexer {
-  if (flags.multiplexer !== undefined) return parseMultiplexer(flags.multiplexer);
-  if (flags.tmux === false) return 'none';
-  return parseMultiplexer(config.multiplexer);
 }
 
 /** Shell command that tears down one session, or null when there is nothing to kill. */

@@ -53,14 +53,12 @@ export class WebUI {
 
   private multiplexerHandlers: {
     get: () => { active: Multiplexer; installed: { tmux: boolean; herdr: boolean } };
-    set: (mux: Multiplexer) => void;
     install: (name: string) => Promise<void>;
   } | null = null;
 
-  /** Backs GET/POST /api/multiplexer and /api/multiplexer/install, wired by index.ts. */
+  /** Backs GET /api/multiplexer and POST /api/multiplexer/install, wired by index.ts. */
   setMultiplexerHandlers(h: {
     get: () => { active: Multiplexer; installed: { tmux: boolean; herdr: boolean } };
-    set: (mux: Multiplexer) => void;
     install: (name: string) => Promise<void>;
   }): void {
     this.multiplexerHandlers = h;
@@ -226,41 +224,15 @@ export class WebUI {
         return;
       }
 
-      if (req.url === '/api/multiplexer' && req.method === 'POST') {
-        // Same CSRF guard as /api/mesh/forwards: this mutates a machine setting.
-        const origin = req.headers.origin;
-        if (origin && !this.isAllowedOrigin(origin)) {
-          res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'cross-origin request blocked' }));
-          return;
-        }
-        if (!this.multiplexerHandlers) {
-          res.writeHead(503, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'multiplexer unavailable' }));
-          return;
-        }
-        let body = '';
-        req.on('data', (c) => { body += c; });
-        req.on('end', () => {
-          let name: unknown;
-          try {
-            name = (JSON.parse(body) as { multiplexer?: unknown }).multiplexer;
-          } catch {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
-            return;
-          }
-          // Strict membership, not parseMultiplexer's lenient default: a typo
-          // must be rejected, never silently applied as tmux.
-          if (!MULTIPLEXERS.includes(name as Multiplexer)) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, error: 'unknown multiplexer' }));
-            return;
-          }
-          this.multiplexerHandlers!.set(name as Multiplexer);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        });
+      // An older client (a stale browser tab, a previous desktop build) may
+      // still POST here. Say so plainly: the catch-all below would otherwise
+      // answer 200 with the dashboard HTML, which reads as "change accepted".
+      if (req.url === '/api/multiplexer' && req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: false,
+          error: 'the multiplexer is detected from what is installed and cannot be set',
+        }));
         return;
       }
 
@@ -508,28 +480,18 @@ async function load(){
   if(!r.ok){say('Multiplexer settings unavailable.','err');return}
   const s=await r.json();
   let h='';
+  // Read-only: the active multiplexer is whatever is installed, so there is
+  // nothing to pick. Installing a binary is what changes the answer, and the
+  // server re-detects the moment one lands.
   for(const name of ['tmux','herdr','none']){
     const inst=name==='none'?null:!!(s.installed||{})[name];
-    const checked=s.active===name?' checked':'';
-    // 'none' needs no binary; a missing one offers an Install button instead of
-    // letting the user select something the machine cannot run.
+    const active=s.active===name?'<span class="state ok">active</span>':'';
     const state=inst===null?'':(inst?'<span class="state ok">installed</span>':'<span class="state missing">not installed</span>');
-    const dis=inst===false?' disabled':'';
     const btn=inst===false?'<button onclick="install(\\''+esc(name)+'\\')">Install</button>':'';
-    h+='<div class="opt"><label><input type="radio" name="mux" value="'+esc(name)+'"'+checked+dis+
-       ' onchange="pick(this.value)"><span class="name">'+esc(name)+'</span>'+state+
+    h+='<div class="opt"><label><span class="name">'+esc(name)+'</span>'+state+active+
        '</label>'+btn+'</div><div class="sub" style="margin:-.35rem 0 .6rem 1rem">'+esc(DESC[name]||'')+'</div>';
   }
   document.getElementById('opts').innerHTML=h;
-}
-async function pick(name){
-  if(busy)return;busy=true;
-  const r=await fetch('/api/multiplexer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({multiplexer:name})});
-  const res=await r.json().catch(()=>({}));
-  busy=false;
-  if(r.ok){say('Now using '+name+'. New connections use it immediately.','note')}
-  else{say(res.error||'Could not change multiplexer.','err')}
-  load();
 }
 async function install(name){
   if(busy)return;busy=true;

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseMultiplexer, sessionNameFor, killSessionCommand, multiplexerFromConfig,
+  parseMultiplexer, sessionNameFor, killSessionCommand, activeMultiplexer,
   killCommandsForPhone, describeMultiplexerStatus, sendKeysCommand,
 } from './multiplexer.js';
 
@@ -58,21 +58,19 @@ test('killSessionCommand: strips quotes so a crafted phone id cannot break out',
   assert.doesNotMatch(killSessionCommand("a'; rm -rf ~; '", 'herdr')!, /rm -rf ~;'/);
 });
 
-test('multiplexerFromConfig: a legacy config with no field means tmux', () => {
-  assert.equal(multiplexerFromConfig({}), 'tmux');
-  assert.equal(multiplexerFromConfig({ multiplexer: 'herdr' }), 'herdr');
+test('activeMultiplexer: herdr wins when both are installed', () => {
+  // It reports a real per-agent status, which is what lets a send refuse
+  // instead of typing into a pane that is mid-turn.
+  assert.equal(activeMultiplexer({ tmux: true, herdr: true }), 'herdr');
 });
 
-test('multiplexerFromConfig: --no-tmux maps to none', () => {
-  assert.equal(multiplexerFromConfig({}, { tmux: false }), 'none');
+test('activeMultiplexer: falls back to tmux, then to the bare shell', () => {
+  assert.equal(activeMultiplexer({ tmux: true, herdr: false }), 'tmux');
+  assert.equal(activeMultiplexer({ tmux: false, herdr: false }), 'none');
 });
 
-test('multiplexerFromConfig: an explicit flag beats the stored config', () => {
-  assert.equal(multiplexerFromConfig({ multiplexer: 'tmux' }, { multiplexer: 'herdr' }), 'herdr');
-});
-
-test('multiplexerFromConfig: --multiplexer wins over --no-tmux when both are given', () => {
-  assert.equal(multiplexerFromConfig({}, { multiplexer: 'herdr', tmux: false }), 'herdr');
+test('activeMultiplexer: a herdr-only machine never reports tmux', () => {
+  assert.equal(activeMultiplexer({ tmux: false, herdr: true }), 'herdr');
 });
 
 test('describeMultiplexerStatus: marks the active one and flags what is missing', () => {
@@ -118,9 +116,10 @@ test('sendKeysCommand: an empty message produces no command', () => {
   assert.equal(sendKeysCommand('tc_p1', '   ', 'tmux'), null);
 });
 
-test('activeMultiplexer: parses the sidecar values it will encounter', () => {
-  // The sidecar is absent until `start` writes it; tmux is the documented
-  // default and must not become 'none' (which disables desk injection).
+test('parseMultiplexer: the wrapper script sidecar still parses leniently', () => {
+  // The sidecar is a cache written by `start`, read by the ttyd wrapper. tmux
+  // is the safe reading of anything unexpected — never 'none', which would
+  // silently drop the user into a bare shell.
   assert.equal(parseMultiplexer(''), 'tmux');
   assert.equal(parseMultiplexer('herdr'), 'herdr');
   assert.equal(parseMultiplexer('nonsense'), 'tmux');

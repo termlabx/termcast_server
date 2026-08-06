@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
-import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
+import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, activeMultiplexer, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
 import { listTerminalTargets } from './terminal-targets.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
 import { AgentRegistry } from './agent/registry.js';
@@ -80,7 +80,6 @@ interface ServerConfig {
   meshPairedAt: number;
   // Which multiplexer this machine runs: 'tmux' | 'herdr' | 'none'. Machine-wide
   // and not secret. Legacy configs lack it and default to tmux.
-  multiplexer: Multiplexer;
 }
 
 const configDir = join(homedir(), '.ttyd-server');
@@ -134,13 +133,13 @@ function loadServerConfig(): ServerConfig | null {
       meshPairedAt: typeof raw.meshPairedAt === 'number' ? raw.meshPairedAt : 0,
       // Legacy configs lack this; anything unrecognised means tmux, so an
       // upgrade behaves exactly as before.
-      multiplexer: parseMultiplexer(raw.multiplexer),
     };
     // Upgrade a legacy plaintext config to ciphertext on first run after update,
-    // and persist the freshly defaulted clusters / meshPairedAt / multiplexer fields.
+    // and persist the freshly defaulted clusters / meshPairedAt fields. A
+    // legacy `multiplexer` field is simply dropped on the next save: the active
+    // multiplexer is detected now, so a stored one has nothing to say.
     if (!isEncrypted(raw.privateKey) || !isEncrypted(raw.pairingSecret)
-        || typeof raw.clusters !== 'object' || typeof raw.meshPairedAt !== 'number'
-        || typeof raw.multiplexer !== 'string') {
+        || typeof raw.clusters !== 'object' || typeof raw.meshPairedAt !== 'number') {
       saveServerConfig(cfg);
     }
     return cfg;
@@ -166,7 +165,6 @@ function saveServerConfig(config: ServerConfig): void {
     pairingSecret: encryptField(config.pairingSecret, key),
     clusters: config.clusters ?? {}, // not secret
     meshPairedAt: config.meshPairedAt ?? 0, // not secret
-    multiplexer: config.multiplexer ?? 'tmux', // not secret
   };
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
   try { chmodSync(configDir, 0o700); } catch {}
@@ -191,17 +189,6 @@ function writeMultiplexerSidecar(mux: Multiplexer): void {
   } catch {}
 }
 
-/**
- * Persist a multiplexer change: config for durability, sidecar for the wrapper
- * script. Works whether or not a server is running — a running one picks the
- * change up on the next connection, with no respawn.
- */
-function setMultiplexerPersisted(mux: Multiplexer): void {
-  const cfg = loadServerConfig();
-  if (cfg) saveServerConfig({ ...cfg, multiplexer: mux });
-  writeMultiplexerSidecar(mux);
-}
-
 /** Offline leave: drop all phone clusters and clear saved peers (next start). */
 function ejectInConfig(): boolean {
   const cfg = loadServerConfig();
@@ -220,8 +207,6 @@ program
   .option('-p, --port <port>', 'Local termcastd port', '7681')
   .option('-w, --web-port <port>', 'Web UI port', '8080')
   .option('-s, --shell <shell>', 'Shell to use')
-  .option('--multiplexer <name>', 'Terminal multiplexer: tmux, herdr, or none')
-  .option('--no-tmux', 'Disable the multiplexer (alias for --multiplexer none)')
   .action(async (opts) => {
     // Resolve the relay before anything else: there is no default, and failing
     // here must not leave a spawned termcastd behind.
@@ -232,12 +217,12 @@ program
     }
     const relayURL = resolvedRelay.url;
 
-    // Flags beat the stored setting; a flag-driven choice is also persisted so
-    // the sidecar (and therefore the browser view) agrees with what ttyd runs.
-    // Process-local mirror of config.json's multiplexer. The bridge reads this
-    // per connection, so changing it takes effect without respawning ttyd.
-    let currentMultiplexer = multiplexerFromConfig(loadServerConfig() ?? {}, opts);
-    setMultiplexerPersisted(currentMultiplexer);
+    // Derived from what is installed, never stored. The bridge reads this per
+    // connection, so installing a multiplexer takes effect on the next phone
+    // without respawning ttyd. The sidecar is written purely as a cache for the
+    // wrapper script — it is an output of detection, not an input to it.
+    let currentMultiplexer = activeMultiplexer();
+    writeMultiplexerSidecar(currentMultiplexer);
 
     const ttyd = new TtydManager({
       port: parseInt(opts.port),
@@ -298,7 +283,6 @@ program
         pairingSecret: currentPairing.pairingSecret,
         clusters: {},
         meshPairedAt: 0,
-        multiplexer: currentMultiplexer,
       });
     }
 
@@ -580,33 +564,43 @@ program
     webUI.setLeaveHandler(() => leaveCluster());
 
     /**
-     * Apply a multiplexer change from any control surface (web UI, CLI, or a
-     * phone's SET_MULTIPLEXER frame). Persists it, mirrors it to the sidecar,
-     * and updates the in-process value the bridge hands to new connections —
-     * no respawn, so live connections are undisturbed and the next one uses it.
+     * Re-derive the multiplexer from what is installed, and publish it.
+     *
+     * Every surface that used to *set* the multiplexer calls this instead.
+     * Setting is gone, but installing a binary genuinely changes the answer, so
+     * re-detecting on those signals is what lets a freshly installed herdr take
+     * effect without a restart. Live connections are undisturbed; the next one
+     * gets the new value.
      */
-    function setMultiplexer(mux: Multiplexer): void {
-      currentMultiplexer = mux;
-      setMultiplexerPersisted(mux);
-      bridge.broadcastMultiplexerState(mux, detectInstalledMultiplexers());
-      console.log(`Multiplexer set to ${mux}.`);
+    function refreshMultiplexer(): Multiplexer {
+      const installed = detectInstalledMultiplexers();
+      const detected = activeMultiplexer(installed);
+      if (detected !== currentMultiplexer) {
+        currentMultiplexer = detected;
+        writeMultiplexerSidecar(detected);
+        console.log(`Multiplexer detected: ${detected}.`);
+      }
+      bridge.broadcastMultiplexerState(detected, installed);
+      return detected;
     }
 
     webUI.setMultiplexerHandlers({
       get: () => ({ active: currentMultiplexer, installed: detectInstalledMultiplexers() }),
-      set: (mux) => setMultiplexer(mux),
       install: async (name) => {
         if (name === 'herdr') {
           await downloadHerdr(join(homedir(), '.termcast', 'bin', 'herdr'));
         } else {
           await downloadTmux();
         }
+        // The install may well have changed which multiplexer is active.
+        refreshMultiplexer();
       },
     });
 
-    // A phone asking for a different multiplexer goes through exactly the same
-    // path as the web UI and the CLI.
-    bridge.on('multiplexer_set', (mux: Multiplexer) => setMultiplexer(mux));
+    // A phone on an older build still sends SET_MULTIPLEXER. There is nothing
+    // to set any more, so answer with the truth: its picker snaps back to what
+    // this machine actually runs instead of showing a change that never took.
+    bridge.on('multiplexer_set', () => refreshMultiplexer());
     bridge.setMultiplexerStateProvider(() => ({
       active: currentMultiplexer,
       installed: detectInstalledMultiplexers(),
@@ -1309,45 +1303,14 @@ mesh
 
 const mux = program
   .command('multiplexer')
-  .description('Show or change the terminal multiplexer (tmux, herdr, or none)');
+  .description('Show the detected terminal multiplexer (tmux, herdr, or none)');
 
+// Read-only: the active multiplexer is whatever is installed, so there is
+// nothing to set. `install` below is the way to change the answer.
 mux.action(() => {
-  const cfg = loadServerConfig();
-  console.log(describeMultiplexerStatus(cfg?.multiplexer ?? 'tmux', detectInstalledMultiplexers()));
+  const installed = detectInstalledMultiplexers();
+  console.log(describeMultiplexerStatus(activeMultiplexer(installed), installed));
 });
-
-mux
-  .command('set <name>')
-  .description('Set the multiplexer: tmux, herdr, or none')
-  .action(async (name: string) => {
-    // Strict membership so a typo is rejected rather than silently applied as
-    // tmux by parseMultiplexer's lenient default.
-    if (!MULTIPLEXERS.includes(name as Multiplexer)) {
-      console.error(`\x1b[31mUnknown multiplexer: ${name}\x1b[0m`);
-      console.error('  → Use one of: tmux, herdr, none');
-      process.exit(1);
-    }
-    // Prefer the running server so its in-memory value (used for each new
-    // connection's url-arg) updates too; otherwise persist for the next start.
-    const state = readRunningState();
-    if (state?.webPort) {
-      try {
-        const resp = await fetch(`http://127.0.0.1:${state.webPort}/api/multiplexer`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ multiplexer: name }),
-        });
-        if (resp.ok) {
-          console.log(`✓ Multiplexer set to ${name}. New connections use it immediately.`);
-          return;
-        }
-      } catch {
-        // Fall through to the offline path below.
-      }
-    }
-    setMultiplexerPersisted(name as Multiplexer);
-    console.log(`✓ Multiplexer set to ${name}.`);
-  });
 
 mux
   .command('install <name>')
