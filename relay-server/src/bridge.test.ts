@@ -492,6 +492,26 @@ test('TERMINAL_ATTACH: logs an [attach] decision line', () => {
     `expected an attach decision line, got: ${lines.join('\n')}`);
 });
 
+test('AGENT_QUESTION: logs answers as JSON so the desktop parser can read them back', () => {
+  // Default interpolation would render ['yes','ship it'] as `answers=yes,ship it`,
+  // which the tray's key=value tokenizer splits at the space. Arrays are JSON.
+  const { bridge, sendInner } = makeBridgeWithSession();
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (m: string) => { lines.push(m); };
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x69]),
+    Buffer.from(JSON.stringify({ requestId: 'q1', answers: ['yes', 'ship it'] })),
+  ]));
+
+  console.log = orig;
+  bridge.stop();
+
+  assert.ok(lines.some((l) => l.includes('answers=["yes","ship it"]')),
+    `expected a JSON answers field, got: ${lines.join('\n')}`);
+});
+
 test('sendAgentFrame: logs server→phone events', () => {
   const { bridge, sendInner } = makeBridgeWithSession();
   const lines: string[] = [];

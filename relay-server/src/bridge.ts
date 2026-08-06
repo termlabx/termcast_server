@@ -112,6 +112,9 @@ interface ClientSession {
 function agentLog(dir: '->' | '<-', fields: Record<string, unknown>): void {
   const parts = Object.entries(fields).map(([k, v]) => {
     if (v === null) return `${k}=null`;
+    // Arrays interpolate to `a,b` — a value with a space in it would then split
+    // across two key=value tokens, so serialize them as JSON.
+    if (Array.isArray(v)) return `${k}=${JSON.stringify(v)}`;
     if (typeof v === 'string' && /[\s"]/.test(v)) return `${k}=${JSON.stringify(v)}`;
     return `${k}=${v}`;
   });
