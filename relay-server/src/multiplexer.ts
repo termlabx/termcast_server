@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
 /**
  * Which terminal multiplexer this machine runs. One at a time, machine-wide —
  * but each keeps its own session namespace, so switching leaves the other's
@@ -10,6 +14,22 @@ export const MULTIPLEXERS: readonly Multiplexer[] = ['tmux', 'herdr', 'none'];
 /** Anything unrecognised (including a legacy config with no field) means tmux. */
 export function parseMultiplexer(value: unknown): Multiplexer {
   return MULTIPLEXERS.includes(value as Multiplexer) ? (value as Multiplexer) : 'tmux';
+}
+
+/**
+ * The multiplexer this machine is configured to use, read from the sidecar file
+ * `start` already maintains for the ttyd wrapper script.
+ *
+ * The agent modules resolve it themselves rather than receiving it, because a
+ * `termcast multiplexer` change must take effect on the next send without a
+ * restart — a value captured at construction time would go stale.
+ */
+export function activeMultiplexer(): Multiplexer {
+  try {
+    return parseMultiplexer(readFileSync(join(homedir(), '.ttyd-server', 'multiplexer'), 'utf8').trim());
+  } catch {
+    return 'tmux';
+  }
 }
 
 /**

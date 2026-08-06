@@ -117,3 +117,11 @@ test('sendKeysCommand: none has no injection mechanism', () => {
 test('sendKeysCommand: an empty message produces no command', () => {
   assert.equal(sendKeysCommand('tc_p1', '   ', 'tmux'), null);
 });
+
+test('activeMultiplexer: parses the sidecar values it will encounter', () => {
+  // The sidecar is absent until `start` writes it; tmux is the documented
+  // default and must not become 'none' (which disables desk injection).
+  assert.equal(parseMultiplexer(''), 'tmux');
+  assert.equal(parseMultiplexer('herdr'), 'herdr');
+  assert.equal(parseMultiplexer('nonsense'), 'tmux');
+});
