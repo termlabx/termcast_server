@@ -258,7 +258,7 @@ const queuedUser = (id: string, text: string, pending: boolean): AgentMessage =>
 
 const questionToolUse = (id: string, input: string): AgentMessage => ({
   id: `q-${id}`, seq: 1, role: 'assistant', timestamp: null,
-  blocks: [{ kind: 'toolUse', toolUseId: id, name: 'question', summary: '', input }],
+  blocks: [{ kind: 'toolUse', toolUseId: id, name: 'question', summary: '', input, truncated: false }],
 });
 
 test('OpencodeAdapter.subscribe: re-emits a message whose content grew', async () => {

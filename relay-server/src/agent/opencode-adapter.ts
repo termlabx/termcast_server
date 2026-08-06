@@ -261,7 +261,10 @@ const seenQuestionToolUseIds = new Set<string>();
  * or `null` when the block carries nothing usable. The transcript can race the
  * question API, so the block is only a fallback.
  */
-function parseQuestionToolUse(block: MessageBlock, sessionId: string): AgentQuestionInfo | null {
+function parseQuestionToolUse(
+  block: Extract<MessageBlock, { kind: 'toolUse' }>,
+  sessionId: string,
+): AgentQuestionInfo | null {
   const toolUseId = block.toolUseId;
   if (!toolUseId) return null;
 
