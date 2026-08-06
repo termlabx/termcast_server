@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
-import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
+import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, multiplexerFromConfig, killCommandsForPhone, describeMultiplexerStatus, activeMultiplexer } from './multiplexer.js';
 import { listTerminalTargets } from './terminal-targets.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
 import { AgentRegistry } from './agent/registry.js';
@@ -50,7 +50,9 @@ import { OpencodeServer } from './agent/opencode-server.js';
 import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
 import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
 import { PermissionBroker } from './agent/permission-broker.js';
-import type { AgentAdapter } from './agent/adapter.js';
+import { deskRegistryFor } from './agent/desk-target.js';
+import { SessionLiveness } from './agent/session-liveness.js';
+import type { AgentAdapter, AgentEvent } from './agent/adapter.js';
 import type { AgentKind } from './agent/types.js';
 
 const program = new Command();
@@ -624,6 +626,30 @@ program
     let opencodeAdapter: OpencodeAdapter | null = null;
     let opencodeUrl: string | null = null;
 
+    // One registry and one liveness oracle for the whole process: both cache,
+    // and a session listing asks them about every session at once.
+    const deskRegistry = deskRegistryFor(activeMultiplexer());
+    const liveness = new SessionLiveness();
+
+    const claudeAdapter = new ClaudeAdapter(undefined, { desk: deskRegistry, liveness });
+    const adapterProvider = (): AgentAdapter[] => [
+      claudeAdapter,
+      ...(opencodeAdapter ? [opencodeAdapter] : []),
+    ];
+    const agentRegistry = new AgentRegistry(adapterProvider, { desk: deskRegistry, liveness });
+    const attachments = new AttachmentManager(agentRegistry);
+
+    // Events with no transcript to tail — an SDK session's messages, and the
+    // turn_end a desk send owes the phone — go to every connection currently
+    // attached to that session. Declared before ensureOpencode because the
+    // opencode adapter is (re)built there and needs it at construction.
+    const agentEventSink = (event: AgentEvent): void => {
+      for (const connId of attachments.connectionsFor(event.sessionId)) {
+        bridge.sendAgentFrame(connId, AGENT_EVENT, event);
+      }
+    };
+    claudeAdapter.setEventSink(agentEventSink);
+
     const ensureOpencode = async (): Promise<void> => {
       const url = await opencodeServer.ensureRunning();
       if (url === opencodeUrl) return;
@@ -632,8 +658,12 @@ program
         ? new OpencodeAdapter(
             new OpencodeClient(url, defaultOpencodeDbPath()),
             new OpencodeEventStream({ baseUrl: url }),
+            { desk: deskRegistry, liveness },
           )
         : null;
+      // Desk sends have no transcript flag to end their turn, so the adapter
+      // emits turn_end itself — it needs the same fan-out the SDK path uses.
+      opencodeAdapter?.setEventSink(agentEventSink);
       if (url) {
         console.log(`\x1b[32m✓ opencode sessions enabled via ${url}\x1b[0m`);
       } else {
@@ -641,14 +671,6 @@ program
       }
     };
     await ensureOpencode();
-
-    const claudeAdapter = new ClaudeAdapter();
-    const adapterProvider = (): AgentAdapter[] => [
-      claudeAdapter,
-      ...(opencodeAdapter ? [opencodeAdapter] : []),
-    ];
-    const agentRegistry = new AgentRegistry(adapterProvider);
-    const attachments = new AttachmentManager(agentRegistry);
 
     const approvalsEnabled = (): boolean => {
       try {
@@ -686,14 +708,6 @@ program
     });
 
     bridge.on('agent_detach_all', () => attachments.detachAll());
-
-    // SDK sessions have no transcript to tail, so their events are pushed to
-    // every connection currently attached to that session.
-    claudeAdapter.setEventSink((event) => {
-      for (const connId of attachments.connectionsFor(event.sessionId)) {
-        bridge.sendAgentFrame(connId, AGENT_EVENT, event);
-      }
-    });
 
     bridge.on('agent_send', async (req: { connId: number; agent: AgentKind; sessionId: string; text: string }) => {
       const adapter = agentRegistry.adapterFor(req.agent);
