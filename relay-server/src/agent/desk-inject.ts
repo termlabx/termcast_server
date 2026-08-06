@@ -7,7 +7,7 @@ import { isInjectable } from './desk-target.js';
 
 const run = promisify(exec);
 
-/** Matches waitForIdle's old bound: a turn may legitimately run for a long time. */
+/** A turn may legitimately run for a long time; this only bounds the watcher. */
 const SETTLE_TIMEOUT_MS = 10 * 60_000;
 const SETTLE_POLL_MS = 800;
 /** herdr needs a beat to move an agent out of idle after a prompt lands. */

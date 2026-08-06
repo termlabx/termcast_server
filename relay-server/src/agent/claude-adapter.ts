@@ -1,99 +1,15 @@
 import { join } from 'node:path';
 import { readdir } from 'node:fs/promises';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
 import type { AgentSessionSummary } from './types.js';
 import { discoverClaudeSessions, defaultProjectsRoot } from './claude-discovery.js';
 import { readMessagesSince, TranscriptTail } from './claude-tail.js';
 import { ClaudeSdkSession } from './claude-sdk-session.js';
-import { readLiveSessions, type LiveSession } from './session-registry.js';
-import { sendKeysCommand } from '../multiplexer.js';
 import { HerdrAgentCli } from './herdr-agent-cli.js';
 import { SessionLiveness } from './session-liveness.js';
 import { deskRegistryFor, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
 import { activeMultiplexer } from '../multiplexer.js';
 import { injectPrompt, waitUntilSettled } from './desk-inject.js';
-
-const run = promisify(exec);
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-export interface IdleWaitOptions {
-  settleMs?: number;
-  pollMs?: number;
-  timeoutMs?: number;
-}
-
-/**
- * Resolves once the pane has read idle on two consecutive samples, so a brief
- * non-idle blink cannot end a turn early. Bounded so a session abandoned
- * mid-turn cannot leave a watcher running forever.
- */
-export async function waitForIdle(
-  sampleIdle: () => Promise<boolean>,
-  opts: IdleWaitOptions = {},
-): Promise<void> {
-  const settleMs = opts.settleMs ?? 2000;
-  const pollMs = opts.pollMs ?? 800;
-  const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
-  await sleep(settleMs);
-  let idleStreak = 0;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const idle = await sampleIdle();
-    idleStreak = idle ? idleStreak + 1 : 0;
-    if (idleStreak >= 2) return;
-    await sleep(pollMs);
-  }
-}
-
-/** One reading of a pane: whether it is in copy mode, and what it is showing. */
-export type PaneProbe = (paneId: string) => Promise<{ inMode: boolean; content: string } | null>;
-
-const tmuxProbe: PaneProbe = async (paneId) => {
-  const id = paneId.replace(/'/g, '');
-  try {
-    const [mode, content] = await Promise.all([
-      run(`tmux display-message -p -t '${id}' '#{pane_in_mode}'`),
-      run(`tmux capture-pane -p -t '${id}'`),
-    ]);
-    return { inMode: mode.stdout.trim() !== '0', content: content.stdout };
-  } catch {
-    return null;
-  }
-};
-
-/**
- * Whether the pane has settled — nothing repainting, no scrollback view open.
- *
- * Two captures a beat apart: a working agent animates a spinner and streams
- * tokens, so its pane differs between them, while a pane parked at its prompt
- * is byte-identical. This deliberately does not look at the cursor column. A
- * TUI parks its cursor inside an input box (a real pane here read `cursor_x=38`
- * while working and `11` while idle), so the old `cursor_x == 0` test read
- * "busy" for every agent pane in existence: sends were refused as "busy at the
- * desk" and turn_end only fired at the 10-minute bound, which is what left the
- * phone showing "Working…" indefinitely.
- */
-export async function paneIsIdle(
-  paneId: string,
-  probe: PaneProbe = tmuxProbe,
-  gapMs = 400,
-): Promise<boolean> {
-  const first = await probe(paneId);
-  // Cannot tell — assume idle rather than blocking the phone entirely.
-  if (!first) return true;
-  if (first.inMode) return false;
-  await sleep(gapMs);
-  const second = await probe(paneId);
-  if (!second) return true;
-  return !second.inMode && second.content === first.content;
-}
-
-export type Injector = (paneId: string, text: string) => Promise<boolean>;
-export type LiveLookup = () => LiveSession[];
-export type IdleSampler = (paneId: string) => Promise<boolean>;
 
 /** The slice of ClaudeSdkSession the adapter depends on, so tests can substitute it. */
 export interface SdkSessionLike {

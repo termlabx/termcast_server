@@ -346,46 +346,6 @@ export class OpencodeClient {
     await this.post(`/api/session/question/${encodeURIComponent(requestId)}/reject`, {});
   }
 
-  /** Append to the TUI input draft without submitting. Best-effort. */
-  async appendPrompt(sessionId: string, text: string): Promise<void> {
-    await this.post(
-      `/api/session/${encodeURIComponent(sessionId)}/prompt/draft`,
-      { text, append: true },
-      sessionId,
-    );
-  }
-
-  /** Submit the current TUI input draft. Best-effort. */
-  async submitPrompt(sessionId: string): Promise<void> {
-    await this.post(
-      `/api/session/${encodeURIComponent(sessionId)}/prompt/submit`,
-      {},
-      sessionId,
-    );
-  }
-
-  /** Whether the last v2 message is a user turn (the TUI has input). */
-  async hasUserMessage(sessionId: string): Promise<boolean> {
-    const body = await this.get(
-      `/api/session/${encodeURIComponent(sessionId)}/message?limit=1&order=desc`,
-      sessionId,
-    );
-    const rows = asArray((body as { data?: unknown } | null)?.data);
-    return rows.length > 0 && (rows[0] as Record<string, unknown>).type === 'user';
-  }
-
-  /** The current TUI draft prompt text, if any. Best-effort. */
-  async getDraftPrompt(sessionId: string): Promise<string | null> {
-    const body = await this.get(
-      `/api/session/${encodeURIComponent(sessionId)}/prompt/draft`,
-      sessionId,
-    );
-    if (body && typeof body === 'object' && typeof (body as Record<string, unknown>).text === 'string') {
-      return (body as { text: string }).text;
-    }
-    return null;
-  }
-
   private toSummary(raw: RawSession): AgentSessionSummary {
     const updated = raw.time?.updated;
     const created = raw.time?.created;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaudeAdapter, waitForIdle, paneIsIdle, type PaneProbe } from './claude-adapter.js';
+import { ClaudeAdapter } from './claude-adapter.js';
 import { OpencodeAdapter, AgentUnsupportedError } from './opencode-adapter.js';
 import { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEvent, OpencodeEventStream } from './opencode-event-stream.js';
@@ -198,51 +198,6 @@ test('ClaudeAdapter.send: a busy desk agent reports rather than interleaving', a
   });
 
   await assert.rejects(() => adapter.send('s1', 'hello'), /busy/i);
-});
-
-/** Two-sample pane probe: each call returns the next scripted frame. */
-const scriptedProbe = (frames: (string | null)[], inMode = false): PaneProbe => {
-  let call = 0;
-  return async () => {
-    const content = frames[Math.min(call++, frames.length - 1)];
-    return content === null ? null : { inMode, content };
-  };
-};
-
-test('paneIsIdle: a repainting pane is busy', async () => {
-  // A working agent animates a spinner and streams tokens, so two captures a
-  // beat apart differ. This is the signal `cursor_x == 0` never gave us: every
-  // TUI parks its cursor inside an input box, so the old probe read "busy"
-  // forever and the phone's Working spinner only cleared at the 10 min bound.
-  const busy = ['✽ Nucleating… (8m 40s · ↓ 33.2k tokens)', '· Nucleating… (8m 41s · ↓ 33.3k tokens)'];
-  assert.equal(await paneIsIdle('%0', scriptedProbe(busy), 0), false);
-});
-
-test('paneIsIdle: a settled pane is idle even with the cursor mid-line', async () => {
-  const settled = ['│ > Try "how does X work?"                    │'];
-  assert.equal(await paneIsIdle('%1', scriptedProbe(settled), 0), true);
-});
-
-test('paneIsIdle: a pane in copy mode is busy, so we never inject into a scrollback view', async () => {
-  assert.equal(await paneIsIdle('%2', scriptedProbe(['same'], true), 0), false);
-});
-
-test('paneIsIdle: an unreadable pane reads idle rather than blocking the phone', async () => {
-  assert.equal(await paneIsIdle('%9', scriptedProbe([null]), 0), true);
-});
-
-test('waitForIdle: requires two consecutive idle reads, so a blink does not end the turn', async () => {
-  // idle, busy, idle, idle → must resolve only after the run of two.
-  const samples: boolean[] = [true, false, true, true];
-  let calls = 0;
-
-  await waitForIdle(async () => samples[calls++], { settleMs: 0, pollMs: 5, timeoutMs: 10_000 });
-
-  assert.equal(calls, 4);
-});
-
-test('waitForIdle: a never-idle pane resolves when the timeout elapses (bounded watcher)', async () => {
-  await waitForIdle(async () => true, { settleMs: 0, pollMs: 5, timeoutMs: 20 });
 });
 
 test('ClaudeAdapter.send: a session nothing holds falls back to the SDK', async () => {
@@ -456,64 +411,6 @@ test('OpencodeAdapter.subscribe: a read failure clears a stuck working state', a
 
   assert.deepEqual(statuses.map((s) => s.status), ['turn_start', 'error']);
   assert.match(statuses[1].detail ?? '', /connection lost/);
-});
-
-test('OpencodeAdapter.subscribe: a TUI draft that is cleared ends its working state', async () => {
-  // The draft poller shows "Working…" when someone types into the laptop TUI,
-  // but nothing ended that state: only the transcript's running flag emits
-  // turn_end, and a draft that is never submitted never flips it. A leftover
-  // line in the desk's input box pinned the phone to Working indefinitely.
-  const drafts = ['typing a th', ''];
-  let poll = 0;
-  const client = {
-    listTranscript: async () => ({ messages: [], running: false }),
-    listQuestions: async () => [],
-    getDraftPrompt: async () => drafts[Math.min(poll++, drafts.length - 1)],
-  } as unknown as OpencodeClient;
-  const statuses: string[] = [];
-  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (event) => {
-    if (event.kind === 'status') statuses.push(event.status);
-  });
-  await new Promise((r) => setTimeout(r, 4700));
-  stop();
-
-  assert.deepEqual(statuses, ['turn_start', 'turn_end']);
-});
-
-test('OpencodeAdapter.subscribe: a growing TUI draft is sent as a replacement, not an append', async () => {
-  // getDraftPrompt returns the whole input box every poll. Sent as plain deltas
-  // the phone appends them, so "typ" then "typing" rendered as "typtyping".
-  const drafts = ['typ', 'typing'];
-  let poll = 0;
-  const client = {
-    listTranscript: async () => ({ messages: [], running: false }),
-    listQuestions: async () => [],
-    getDraftPrompt: async () => drafts[Math.min(poll++, drafts.length - 1)],
-  } as unknown as OpencodeClient;
-  const deltas: { text: string; replace?: boolean }[] = [];
-  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (event) => {
-    if (event.kind === 'delta') deltas.push({ text: event.text, replace: event.replace });
-  });
-  await new Promise((r) => setTimeout(r, 4700));
-  stop();
-
-  assert.deepEqual(deltas, [{ text: 'typ', replace: true }, { text: 'typing', replace: true }]);
-});
-
-test('OpencodeAdapter.subscribe: an empty TUI draft never starts a working state', async () => {
-  const client = {
-    listTranscript: async () => ({ messages: [], running: false }),
-    listQuestions: async () => [],
-    getDraftPrompt: async () => '',
-  } as unknown as OpencodeClient;
-  const statuses: string[] = [];
-  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (event) => {
-    if (event.kind === 'status') statuses.push(event.status);
-  });
-  await new Promise((r) => setTimeout(r, 2600));
-  stop();
-
-  assert.deepEqual(statuses, []);
 });
 
 // --- signal-driven subscribe (the /api/event routing split) ----------------

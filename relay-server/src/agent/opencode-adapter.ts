@@ -214,45 +214,6 @@ export class OpencodeAdapter implements AgentAdapter {
       if (this.eventStream?.isConnected()) void transcript();
     }, SAFETY_POLL_MS));
 
-    // Reverse-sync: detect when the laptop's TUI has input drafted. Best-effort;
-    // silently degrades if the route is absent or the client is unreachable.
-    let lastDraft: string | null = null;
-    /** True once a draft (not the transcript) raised the working state. */
-    let draftWorking = false;
-    const DRAFT_POLL_MS = 2000;
-    intervals.push(setInterval(async () => {
-      if (stopped) return;
-      try {
-        const draft = await this.client.getDraftPrompt(sessionId);
-        if (stopped || draft === null || draft === lastDraft) return;
-        lastDraft = draft;
-
-        if (draft === '') {
-          // The desk submitted or abandoned the line. A submit flips the
-          // transcript's running flag, which owns the status from there; an
-          // abandoned draft has to end the state it started, or the phone
-          // spins on a line nobody ever sent.
-          if (draftWorking && !wasRunning) {
-            onEvent({ kind: 'status', sessionId, seq: -1, status: 'turn_end' });
-          }
-          draftWorking = false;
-          return;
-        }
-
-        // A draft appearing while the session is idle means the user typed
-        // something in the TUI — show it as a working indicator, once.
-        if (!wasRunning && !draftWorking) {
-          draftWorking = true;
-          onEvent({ kind: 'status', sessionId, seq: -1, status: 'turn_start' });
-        }
-        // The whole input box, re-read every poll — a replacement, not an
-        // increment, or the phone renders "typ" + "typing" as "typtyping".
-        onEvent({ kind: 'delta', sessionId, messageId: 'tui-draft', text: draft, replace: true });
-      } catch {
-        // Best-effort: ignore failures.
-      }
-    }, DRAFT_POLL_MS));
-
     void transcript();
 
     return () => {
