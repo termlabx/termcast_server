@@ -49,6 +49,7 @@ import { OpencodeClient, defaultOpencodeDbPath } from './agent/opencode-client.j
 import { OpencodeServer } from './agent/opencode-server.js';
 import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
 import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
+import { ensureHooks, writeOptOut, clearOptOut } from './agent/hook-autosetup.js';
 import { PermissionBroker } from './agent/permission-broker.js';
 import { defaultDeskRegistry } from './agent/desk-target.js';
 import { SessionLiveness } from './agent/session-liveness.js';
@@ -608,6 +609,24 @@ program
     // The raw-terminal picker resolves fresh on every request, so a session the
     // user just created is visible without waiting for anything.
     bridge.setTerminalTargetsProvider(() => listTerminalTargets());
+
+    // Claude Code's hooks are what record which pane holds a session. Without
+    // them a session started in tmux is unreachable from the phone, and the
+    // guard that should refuse the send stays silent — so it is answered
+    // headlessly while the user's own terminal shows nothing. Ensuring them
+    // here is what makes a fresh install work with no manual step; a
+    // deliberate `agent teardown` is remembered and honoured.
+    switch (ensureHooks()) {
+      case 'installed':
+        console.log('\x1b[32m✓ Phone approvals enabled (Claude Code hooks installed)\x1b[0m');
+        break;
+      case 'failed':
+        console.warn(`\x1b[33m⚠ Could not install Claude Code hooks — agent sessions may not be reachable. Run: termcast agent setup\x1b[0m`);
+        break;
+      default:
+        // already / opted-out / no-claude: the routine steady state.
+        break;
+    }
 
     // --- Agent sessions -----------------------------------------------------
     // opencode is optional: if no server can be found or spawned, only Claude
@@ -1341,6 +1360,8 @@ agent
   .action(() => {
     stageHookScripts();
     installHooks(hookSettingsPath(), { hookDir: hookInstallDir() });
+    // Clears any previous opt-out, so the next start stops skipping them.
+    clearOptOut();
     console.log('Installed. Claude Code sessions can now be approved from a paired phone.');
     console.log('Sessions with no phone attached are unaffected. Undo with: termcast agent teardown');
   });
@@ -1350,7 +1371,10 @@ agent
   .description('Remove the Claude Code hooks installed by setup')
   .action(() => {
     removeHooks(hookSettingsPath());
+    // Remembered, or the next daemon start would put them straight back.
+    writeOptOut();
     console.log('Removed. Tool approvals return to the terminal prompt.');
+    console.log('Termcast will not re-install them. Undo with: termcast agent setup');
   });
 
 agent
