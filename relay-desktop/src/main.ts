@@ -27,6 +27,8 @@ import { trayIconFile } from './tray-icons';
 import { collectUsage } from './ai-metrics';
 import { summarize } from './ai-usage';
 import { aiMetricsHtml } from './ai-metrics-html';
+import { parseAgentLogEvents } from './server-agent-log-parser';
+import { openAgentLogWindow, closeAgentLogWindow, pushAgentLogEvent } from './agent-log-window';
 
 interface Settings {
   openAtLogin: boolean;
@@ -590,6 +592,8 @@ function updateTray(): void {
   // available whether or not the server is running) ---
   menuItems.push({ type: 'separator' });
   menuItems.push({ label: '📊  AI Metrics…', click: () => showAiMetricsWindow() });
+  // Live trace of the agent frames the phone exchanges with this server.
+  menuItems.push({ label: '📜  Agent Log…', click: () => openAgentLogWindow() });
 
   menuItems.push({ type: 'separator' });
   menuItems.push({
@@ -709,6 +713,8 @@ function startServer(saveState = true): void {
       updateTray();
     }
 
+    for (const ev of parseAgentLogEvents(line)) pushAgentLogEvent(ev);
+
     for (const ev of parseClientLogEvents(line)) {
       if (ev.kind === 'connected') {
         if (!connectedClients.has(ev.id)) connectedClients.set(ev.id, { info: null });
@@ -825,6 +831,7 @@ function startServer(saveState = true): void {
     forwardsWindow?.close();
   multiplexerWindow?.close();
   aiMetricsWindow?.close();
+  closeAgentLogWindow();
     updateTray();
 
     if (code !== 0 && code !== null) {
@@ -891,6 +898,7 @@ function stopServer(saveState = true): Promise<void> {
   forwardsWindow?.close();
   multiplexerWindow?.close();
   aiMetricsWindow?.close();
+  closeAgentLogWindow();
   closeQRWindow();
   updateTray();
 
