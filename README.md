@@ -19,7 +19,7 @@ The mobile apps and the relay service itself are not part of this repository.
 ## Install
 
 ```bash
-curl -fsSL https://termcast.download.ulixlab.com/install.sh | bash
+curl -fsSL https://ttyd-relay.xing-mathcoder.workers.dev/install.sh | bash
 ```
 
 Or, with Node.js 24+ already installed:

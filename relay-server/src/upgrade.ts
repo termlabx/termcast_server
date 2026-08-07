@@ -12,7 +12,7 @@ import { sep } from 'node:path';
 // Public download host for release assets. Override with TERMCAST_RELEASES_URL
 // to self-host. Distinct from the relay, which has no default at all — see
 // relay-url.ts.
-const DEFAULT_BASE_URL = 'https://termcast.download.ulixlab.com';
+const DEFAULT_BASE_URL = 'https://ttyd-relay.xing-mathcoder.workers.dev';
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux']);
 const SUPPORTED_ARCHS = new Set(['x64', 'arm64']);
 

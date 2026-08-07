@@ -6,10 +6,10 @@ export interface ClusterState {
 }
 export type ClusterMap = Record<string, ClusterState>; // keyed by phoneId
 
-/** tmux-safe session name; MUST match the ttyd wrapper's computation. */
-export function sessionNameFor(phoneId: string): string {
-  return 'tc_' + phoneId.replace(/[^A-Za-z0-9_]/g, '_');
-}
+// One implementation of the session-name scheme, shared with the ttyd wrapper
+// and the teardown commands. Re-exported here so existing callers keep working.
+import { sessionNameFor } from './multiplexer.js';
+export { sessionNameFor };
 
 export function isActiveCluster(state: { pairedAt: number }, now: number = Date.now()): boolean {
   return now < state.pairedAt + SEVEN_DAYS_MS;
@@ -53,12 +53,14 @@ export function upsertCluster(
 /** Split into the surviving map and the session names of expired clusters. */
 export function sweepExpiredClusters(
   clusters: ClusterMap, now: number = Date.now(),
-): { kept: ClusterMap; expired: string[] } {
+): { kept: ClusterMap; expiredPhoneIds: string[] } {
   const kept: ClusterMap = {};
-  const expired: string[] = [];
+  const expiredPhoneIds: string[] = [];
   for (const [id, c] of Object.entries(clusters)) {
     if (isActiveCluster(c, now)) kept[id] = c;
-    else expired.push(c.sessionName);
+    // Phone ids, not session names: a phone can hold one session per
+    // multiplexer and the caller must be able to derive every one of them.
+    else expiredPhoneIds.push(id);
   }
-  return { kept, expired };
+  return { kept, expiredPhoneIds };
 }

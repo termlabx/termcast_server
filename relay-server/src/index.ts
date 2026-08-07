@@ -17,7 +17,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 import { Command } from 'commander';
-import { TtydManager } from './ttyd-manager.js';
+import { TtydManager, detectInstalledMultiplexers, downloadTmux } from './ttyd-manager.js';
+import { downloadHerdr } from './herdr-install.js';
 import { shouldRecoverFromTtydExit } from './ttyd-restart-policy.js';
 import { RelayClient } from './relay-client.js';
 import { Bridge } from './bridge.js';
@@ -36,7 +37,24 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
+import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, activeMultiplexer, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
+import { listTerminalTargets } from './terminal-targets.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
+import { AgentRegistry } from './agent/registry.js';
+import { AttachmentManager } from './agent/attachments.js';
+import { ClaudeAdapter } from './agent/claude-adapter.js';
+import { OpencodeAdapter } from './agent/opencode-adapter.js';
+import { OpencodeEventStream } from './agent/opencode-event-stream.js';
+import { OpencodeClient, defaultOpencodeDbPath } from './agent/opencode-client.js';
+import { OpencodeServer } from './agent/opencode-server.js';
+import { AGENT_SESSIONS, AGENT_EVENT } from './agent/frames.js';
+import { stageHookScripts, installHooks, removeHooks, hooksInstalled, hookSettingsPath, hookInstallDir } from './agent/hook-install.js';
+import { ensureHooks, writeOptOut, clearOptOut } from './agent/hook-autosetup.js';
+import { PermissionBroker } from './agent/permission-broker.js';
+import { defaultDeskRegistry } from './agent/desk-target.js';
+import { SessionLiveness } from './agent/session-liveness.js';
+import type { AgentAdapter, AgentEvent } from './agent/adapter.js';
+import type { AgentKind } from './agent/types.js';
 
 const program = new Command();
 
@@ -61,6 +79,8 @@ interface ServerConfig {
   // so the mesh survives the phone being offline and old phones that don't send
   // `phone_id`. See membership.ts: >0 active-until+7d, 0 never, <0 ejected.
   meshPairedAt: number;
+  // Which multiplexer this machine runs: 'tmux' | 'herdr' | 'none'. Machine-wide
+  // and not secret. Legacy configs lack it and default to tmux.
 }
 
 const configDir = join(homedir(), '.ttyd-server');
@@ -112,9 +132,13 @@ function loadServerConfig(): ServerConfig | null {
       // Legacy configs lack this; 0 = never associated (mesh off until a QR show
       // or a mesh invite re-anchors it).
       meshPairedAt: typeof raw.meshPairedAt === 'number' ? raw.meshPairedAt : 0,
+      // Legacy configs lack this; anything unrecognised means tmux, so an
+      // upgrade behaves exactly as before.
     };
     // Upgrade a legacy plaintext config to ciphertext on first run after update,
-    // and persist the freshly defaulted clusters / meshPairedAt fields.
+    // and persist the freshly defaulted clusters / meshPairedAt fields. A
+    // legacy `multiplexer` field is simply dropped on the next save: the active
+    // multiplexer is detected now, so a stored one has nothing to say.
     if (!isEncrypted(raw.privateKey) || !isEncrypted(raw.pairingSecret)
         || typeof raw.clusters !== 'object' || typeof raw.meshPairedAt !== 'number') {
       saveServerConfig(cfg);
@@ -149,6 +173,23 @@ function saveServerConfig(config: ServerConfig): void {
   try { chmodSync(configFile, 0o600); } catch {}
 }
 
+const multiplexerFile = join(configDir, 'multiplexer');
+
+/**
+ * Mirror the active multiplexer into a one-word file the ttyd wrapper script
+ * reads at connection time. The script runs under dash and cannot parse
+ * config.json, hence the sidecar. Writing via a temp file + rename keeps the
+ * read atomic, so a connection landing mid-write never sees a truncated value.
+ */
+function writeMultiplexerSidecar(mux: Multiplexer): void {
+  try {
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    const tmp = `${multiplexerFile}.tmp`;
+    writeFileSync(tmp, `${mux}\n`, { mode: 0o600 });
+    renameSync(tmp, multiplexerFile);
+  } catch {}
+}
+
 /** Offline leave: drop all phone clusters and clear saved peers (next start). */
 function ejectInConfig(): boolean {
   const cfg = loadServerConfig();
@@ -167,7 +208,6 @@ program
   .option('-p, --port <port>', 'Local termcastd port', '7681')
   .option('-w, --web-port <port>', 'Web UI port', '8080')
   .option('-s, --shell <shell>', 'Shell to use')
-  .option('--no-tmux', 'Disable auto tmux session')
   .action(async (opts) => {
     // Resolve the relay before anything else: there is no default, and failing
     // here must not leave a spawned termcastd behind.
@@ -178,7 +218,18 @@ program
     }
     const relayURL = resolvedRelay.url;
 
-    const ttyd = new TtydManager({ port: parseInt(opts.port), shell: opts.shell, tmux: opts.tmux });
+    // Derived from what is installed, never stored. The bridge reads this per
+    // connection, so installing a multiplexer takes effect on the next phone
+    // without respawning ttyd. The sidecar is written purely as a cache for the
+    // wrapper script — it is an output of detection, not an input to it.
+    let currentMultiplexer = activeMultiplexer();
+    writeMultiplexerSidecar(currentMultiplexer);
+
+    const ttyd = new TtydManager({
+      port: parseInt(opts.port),
+      shell: opts.shell,
+      multiplexer: currentMultiplexer,
+    });
     const webUI = new WebUI();
     webUI.setTtydPort(parseInt(opts.port));
 
@@ -254,10 +305,15 @@ program
       if (cfg) saveServerConfig({ ...cfg, meshPairedAt });
     };
 
-    // Kill the OS tmux sessions for a set of session names (best-effort).
-    function killSessions(names: string[]): void {
-      for (const name of names) {
-        try { execSync(`tmux kill-session -t '${name.replace(/'/g, '')}' 2>/dev/null`); } catch {}
+    // Tear down every multiplexer's session for a set of phones (best-effort).
+    // A phone can hold one session per multiplexer — switching the setting
+    // deliberately leaves the other dormant rather than killing it — so expiry
+    // and leave must clear both namespaces.
+    function killPhoneSessions(phoneIds: string[]): void {
+      for (const id of phoneIds) {
+        for (const cmd of killCommandsForPhone(id)) {
+          try { execSync(cmd); } catch {}
+        }
       }
     }
 
@@ -433,6 +489,9 @@ program
     // Inactive ⇒ permanent evict; active-but-unknown ⇒ retry (invite may be in
     // flight). This prevents the mutual-eviction deadlock during simultaneous
     // bidirectional mesh setup.
+    // Read live rather than captured, so a switch (from the web UI, the CLI, or
+    // a phone) reaches the very next connection.
+    bridge.setMultiplexerProvider(() => currentMultiplexer);
     bridge.setMeshActiveCheck(() => isMeshActive(meshPairedAt));
     bridge.setMeshMembershipCheck((peerDeviceId) =>
       savedPeers.some(p => p.deviceId === peerDeviceId));
@@ -490,7 +549,7 @@ program
     // Leave: drop every phone cluster, kill their tmux sessions, isolate mesh,
     // and best-effort notify connected phones.
     function leaveCluster(): { ok: true } {
-      killSessions(Object.values(clusters).map((c) => c.sessionName));
+      killPhoneSessions(Object.keys(clusters));
       clusters = {};
       persistClusters();
       // Durable ejection: survives restarts and is honoured over stale invites,
@@ -504,6 +563,218 @@ program
     }
 
     webUI.setLeaveHandler(() => leaveCluster());
+
+    /**
+     * Re-derive the multiplexer from what is installed, and publish it.
+     *
+     * Every surface that used to *set* the multiplexer calls this instead.
+     * Setting is gone, but installing a binary genuinely changes the answer, so
+     * re-detecting on those signals is what lets a freshly installed herdr take
+     * effect without a restart. Live connections are undisturbed; the next one
+     * gets the new value.
+     */
+    function refreshMultiplexer(): Multiplexer {
+      const installed = detectInstalledMultiplexers();
+      const detected = activeMultiplexer(installed);
+      if (detected !== currentMultiplexer) {
+        currentMultiplexer = detected;
+        writeMultiplexerSidecar(detected);
+        console.log(`Multiplexer detected: ${detected}.`);
+      }
+      bridge.broadcastMultiplexerState(detected, installed);
+      return detected;
+    }
+
+    webUI.setMultiplexerHandlers({
+      get: () => ({ active: currentMultiplexer, installed: detectInstalledMultiplexers() }),
+      install: async (name) => {
+        if (name === 'herdr') {
+          await downloadHerdr(join(homedir(), '.termcast', 'bin', 'herdr'));
+        } else {
+          await downloadTmux();
+        }
+        // The install may well have changed which multiplexer is active.
+        refreshMultiplexer();
+      },
+    });
+
+    // A phone on an older build still sends SET_MULTIPLEXER. There is nothing
+    // to set any more, so answer with the truth: its picker snaps back to what
+    // this machine actually runs instead of showing a change that never took.
+    bridge.on('multiplexer_set', () => refreshMultiplexer());
+    bridge.setMultiplexerStateProvider(() => ({
+      active: currentMultiplexer,
+      installed: detectInstalledMultiplexers(),
+    }));
+    // The raw-terminal picker resolves fresh on every request, so a session the
+    // user just created is visible without waiting for anything.
+    bridge.setTerminalTargetsProvider(() => listTerminalTargets());
+
+    // Claude Code's hooks are what record which pane holds a session. Without
+    // them a session started in tmux is unreachable from the phone, and the
+    // guard that should refuse the send stays silent — so it is answered
+    // headlessly while the user's own terminal shows nothing. Ensuring them
+    // here is what makes a fresh install work with no manual step; a
+    // deliberate `agent teardown` is remembered and honoured.
+    switch (ensureHooks()) {
+      case 'installed':
+        console.log('\x1b[32m✓ Phone approvals enabled (Claude Code hooks installed)\x1b[0m');
+        break;
+      case 'failed':
+        console.warn(`\x1b[33m⚠ Could not install Claude Code hooks — agent sessions may not be reachable. Run: termcast agent setup\x1b[0m`);
+        break;
+      default:
+        // already / opted-out / no-claude: the routine steady state.
+        break;
+    }
+
+    // --- Agent sessions -----------------------------------------------------
+    // opencode is optional: if no server can be found or spawned, only Claude
+    // Code sessions are listed. A missing agent is never an error.
+    //
+    // It is discovered lazily on every session listing, so a server started
+    // before opencode was available picks it up without a restart, and a
+    // crashed `opencode serve` is recovered on the next listing.
+    const opencodeServer = new OpencodeServer();
+    let opencodeAdapter: OpencodeAdapter | null = null;
+    let opencodeUrl: string | null = null;
+
+    // One desk registry and one liveness oracle for the whole process: a
+    // session listing asks them about every session at once, and the liveness
+    // oracle caches its process scan across those calls.
+    const deskRegistry = defaultDeskRegistry();
+    const liveness = new SessionLiveness();
+
+    const claudeAdapter = new ClaudeAdapter(undefined, { desk: deskRegistry, liveness });
+    const adapterProvider = (): AgentAdapter[] => [
+      claudeAdapter,
+      ...(opencodeAdapter ? [opencodeAdapter] : []),
+    ];
+    const agentRegistry = new AgentRegistry(adapterProvider, { desk: deskRegistry, liveness });
+    const attachments = new AttachmentManager(agentRegistry);
+
+    // Events with no transcript to tail — an SDK session's messages, and the
+    // turn_end a desk send owes the phone — go to every connection currently
+    // attached to that session. Declared before ensureOpencode because the
+    // opencode adapter is (re)built there and needs it at construction.
+    const agentEventSink = (event: AgentEvent): void => {
+      for (const connId of attachments.connectionsFor(event.sessionId)) {
+        bridge.sendAgentFrame(connId, AGENT_EVENT, event);
+      }
+    };
+    claudeAdapter.setEventSink(agentEventSink);
+
+    const ensureOpencode = async (): Promise<void> => {
+      const url = await opencodeServer.ensureRunning();
+      if (url === opencodeUrl) return;
+      opencodeUrl = url;
+      opencodeAdapter = url
+        ? new OpencodeAdapter(
+            new OpencodeClient(url, defaultOpencodeDbPath()),
+            new OpencodeEventStream({ baseUrl: url }),
+            { desk: deskRegistry, liveness },
+          )
+        : null;
+      // Desk sends have no transcript flag to end their turn, so the adapter
+      // emits turn_end itself — it needs the same fan-out the SDK path uses.
+      opencodeAdapter?.setEventSink(agentEventSink);
+      if (url) {
+        console.log(`\x1b[32m✓ opencode sessions enabled via ${url}\x1b[0m`);
+      } else {
+        console.warn('\x1b[33m⚠ opencode not available — only Claude Code sessions will be listed.\x1b[0m');
+      }
+    };
+    await ensureOpencode();
+
+    const approvalsEnabled = (): boolean => {
+      try {
+        return hooksInstalled(JSON.parse(readFileSync(hookSettingsPath(), 'utf8')));
+      } catch {
+        return false;
+      }
+    };
+
+    bridge.on('agent_list', async ({ connId }: { connId: number }) => {
+      await ensureOpencode();
+      const sessions = await agentRegistry.list();
+      bridge.sendAgentFrame(connId, AGENT_SESSIONS, { sessions, approvalsEnabled: approvalsEnabled() });
+    });
+
+    bridge.on('agent_attach', async (req: { connId: number; agent: AgentKind; sessionId: string; sinceSeq: number }) => {
+      // Backfill first so the phone has context before live events arrive.
+      const page = await agentRegistry.history(req.agent, req.sessionId, null, 50);
+      bridge.sendAgentFrame(req.connId, AGENT_EVENT, {
+        kind: 'history', sessionId: req.sessionId, beforeSeq: null,
+        hasMore: page.hasMore, messages: page.messages,
+      });
+
+      await attachments.attach(req.connId, req.agent, req.sessionId, req.sinceSeq, (event) => {
+        bridge.sendAgentFrame(req.connId, AGENT_EVENT, event);
+      });
+    });
+
+    bridge.on('agent_history', async (req: { connId: number; agent: AgentKind; sessionId: string; beforeSeq: number | null; limit: number }) => {
+      const page = await agentRegistry.history(req.agent, req.sessionId, req.beforeSeq, Math.min(req.limit, 50));
+      bridge.sendAgentFrame(req.connId, AGENT_EVENT, {
+        kind: 'history', sessionId: req.sessionId, beforeSeq: req.beforeSeq,
+        hasMore: page.hasMore, messages: page.messages,
+      });
+    });
+
+    bridge.on('agent_detach_all', () => attachments.detachAll());
+
+    bridge.on('agent_send', async (req: { connId: number; agent: AgentKind; sessionId: string; text: string }) => {
+      const adapter = agentRegistry.adapterFor(req.agent);
+      if (!adapter) return;
+      try {
+        await adapter.send(req.sessionId, req.text);
+      } catch (err) {
+        bridge.sendAgentFrame(req.connId, AGENT_EVENT, {
+          kind: 'status', sessionId: req.sessionId, seq: -1,
+          status: 'error', detail: (err as Error).message,
+        });
+      }
+    });
+
+    bridge.on('agent_interrupt', async (req: { connId: number; agent: AgentKind; sessionId: string }) => {
+      await agentRegistry.adapterFor(req.agent)?.interrupt(req.sessionId).catch(() => {});
+    });
+
+    const permissionBroker = new PermissionBroker();
+
+    // Fan every pending permission out to the phones watching that session.
+    permissionBroker.onRequest((request) => {
+      for (const connId of attachments.connectionsFor(request.sessionId)) {
+        bridge.sendAgentFrame(connId, AGENT_EVENT, {
+          kind: 'permission', sessionId: request.sessionId, seq: -1, request,
+        });
+      }
+    });
+
+    bridge.on('agent_permission', async (req: { requestId: string; behavior: 'allow' | 'deny' }) => {
+      permissionBroker.resolve(req.requestId, req.behavior);
+      // SDK-driven sessions hold their own resolvers.
+      for (const adapter of adapterProvider()) {
+        await adapter.respondPermission(req.requestId, req.behavior).catch(() => {});
+      }
+    });
+
+    bridge.on('agent_question', async (req: { connId: number; requestId: string; answers?: string[]; rejected?: boolean }) => {
+      for (const adapter of adapterProvider()) {
+        await adapter.respondQuestion(req.requestId, req.answers, req.rejected).catch(() => {});
+      }
+    });
+
+    // A pending approval must not outlive the phone that could answer it.
+    bridge.on('agent_detach', ({ connId }: { connId: number }) => {
+      attachments.detach(connId);
+      if (attachments.attachedSessions().length === 0) permissionBroker.releaseAll();
+    });
+
+    webUI.setPermissionHandler({
+      broker: permissionBroker,
+      isAttached: (id) => attachments.isAttached(id),
+    });
 
     // CLI-driven forward add/remove (POST /api/mesh/forwards).
     webUI.setMeshForwardHandler((raw: unknown) => {
@@ -538,6 +809,10 @@ program
       }));
     };
     saveState();
+
+    // The agent permission hook needs the loopback web port to ask whether a
+    // phone wants to approve a tool call.
+    writeFileSync(join(stateDir, 'web-port'), `${webUI.port}\n`);
 
     // Expose a live snapshot for `termcast status` (served at GET /api/status).
     webUI.setStatusProvider((): StatusSnapshot => {
@@ -599,9 +874,9 @@ program
     // (2) isolate the server↔server mesh once its association window lapses.
     // These are now independent: the mesh no longer requires a phone cluster.
     const clusterSweepTimer = setInterval(() => {
-      const { kept, expired } = sweepExpiredClusters(clusters);
+      const { kept, expiredPhoneIds: expired } = sweepExpiredClusters(clusters);
       if (expired.length > 0) {
-        killSessions(expired);
+        killPhoneSessions(expired);
         clusters = kept;
         persistClusters();
         console.log(`Expired ${expired.length} cluster(s) past the 7-day cap.`);
@@ -622,6 +897,8 @@ program
       shuttingDown = true;
       console.log('\nShutting down...');
       bridge.stop();
+      attachments.detachAll();
+      opencodeServer.stop();
       relay.disconnect();
       webUI.stop();
       clearInterval(clusterSweepTimer);
@@ -1041,6 +1318,76 @@ mesh
         console.log(`  localhost:${f.localPort} → :${f.remotePort}${status}`);
       }
     }
+  });
+
+const mux = program
+  .command('multiplexer')
+  .description('Show the detected terminal multiplexer (tmux, herdr, or none)');
+
+// Read-only: the active multiplexer is whatever is installed, so there is
+// nothing to set. `install` below is the way to change the answer.
+mux.action(() => {
+  const installed = detectInstalledMultiplexers();
+  console.log(describeMultiplexerStatus(activeMultiplexer(installed), installed));
+});
+
+mux
+  .command('install <name>')
+  .description('Install a multiplexer binary: tmux or herdr')
+  .action(async (name: string) => {
+    if (name !== 'tmux' && name !== 'herdr') {
+      console.error(`\x1b[31mNothing to install for: ${name}\x1b[0m`);
+      console.error('  → Use one of: tmux, herdr');
+      process.exit(1);
+    }
+    try {
+      console.log(`Installing ${name} for ${process.platform}-${process.arch}...`);
+      const path = name === 'herdr'
+        ? (await downloadHerdr(join(homedir(), '.termcast', 'bin', 'herdr')), join(homedir(), '.termcast', 'bin', 'herdr'))
+        : await downloadTmux();
+      console.log(`✓ ${name} installed at ${path}`);
+    } catch (err) {
+      console.error(`\x1b[31m${name} install failed: ${(err as Error).message}\x1b[0m`);
+      process.exit(1);
+    }
+  });
+
+const agent = program.command('agent').description('Agent session chat controls');
+
+agent
+  .command('setup')
+  .description('Install Claude Code hooks so phones can approve tool calls')
+  .action(() => {
+    stageHookScripts();
+    installHooks(hookSettingsPath(), { hookDir: hookInstallDir() });
+    // Clears any previous opt-out, so the next start stops skipping them.
+    clearOptOut();
+    console.log('Installed. Claude Code sessions can now be approved from a paired phone.');
+    console.log('Sessions with no phone attached are unaffected. Undo with: termcast agent teardown');
+  });
+
+agent
+  .command('teardown')
+  .description('Remove the Claude Code hooks installed by setup')
+  .action(() => {
+    removeHooks(hookSettingsPath());
+    // Remembered, or the next daemon start would put them straight back.
+    writeOptOut();
+    console.log('Removed. Tool approvals return to the terminal prompt.');
+    console.log('Termcast will not re-install them. Undo with: termcast agent setup');
+  });
+
+agent
+  .command('status')
+  .description('Show whether phone approvals are enabled')
+  .action(() => {
+    let installed = false;
+    try {
+      installed = hooksInstalled(JSON.parse(readFileSync(hookSettingsPath(), 'utf8')));
+    } catch {
+      installed = false;
+    }
+    console.log(installed ? 'Phone approvals: enabled' : 'Phone approvals: not installed (run: termcast agent setup)');
   });
 
 program

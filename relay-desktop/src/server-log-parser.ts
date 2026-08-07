@@ -31,3 +31,20 @@ export function parseClientLogEvents(chunk: string): ClientLogEvent[] {
   }
   return events;
 }
+
+/**
+ * Multiplexer lifecycle lines worth surfacing in the tray. herdr is downloaded
+ * lazily (~17MB) the first time it is selected, so without a notification the
+ * first switch looks like a hang.
+ *
+ * tmux's equivalent lines are handled inline in main.ts and deliberately not
+ * matched here, so the two do not both fire.
+ */
+export type MultiplexerLogEvent = 'herdr-downloading' | 'herdr-ready' | 'herdr-unavailable';
+
+export function parseMultiplexerLogEvent(line: string): MultiplexerLogEvent | null {
+  if (line.includes('herdr not found — downloading')) return 'herdr-downloading';
+  if (line.includes('herdr ready')) return 'herdr-ready';
+  if (line.includes('herdr unavailable')) return 'herdr-unavailable';
+  return null;
+}

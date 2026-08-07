@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as net from 'node:net';
 import { WebUI } from './web-ui.js';
+import type { Multiplexer } from './multiplexer.js';
 import { generatePairingInfo } from './pairing.js';
 
 function samplePairing() {
@@ -127,6 +128,75 @@ test('GET /api/pairing (no new) displays the current QR without minting or regis
   assert.equal(registered, 0, 'plain poll must not register a grant');
 });
 
+async function uiWithMultiplexer(active: Multiplexer = 'tmux', installed = { tmux: true, herdr: false }) {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  const installCalls: string[] = [];
+  ui.setMultiplexerHandlers({
+    get: () => ({ active, installed }),
+    install: async (n) => { installCalls.push(n); },
+  });
+  return { ui, installCalls };
+}
+
+test('GET /api/multiplexer: reports the active one and what is installed', async () => {
+  const { ui } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`);
+  assert.equal(resp.status, 200);
+  assert.deepEqual(await resp.json(), { active: 'tmux', installed: { tmux: true, herdr: false } });
+});
+
+// The active multiplexer is detected, not set, so the route that used to
+// change it is gone: a stored value is a second source of truth that drifts.
+test('POST /api/multiplexer: refuses explicitly rather than 200-ing the dashboard HTML', async () => {
+  const { ui } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ multiplexer: 'herdr' }),
+  });
+  assert.equal(resp.status, 405);
+  assert.match((await resp.json() as { error: string }).error, /cannot be set/);
+});
+
+test('POST /api/multiplexer/install: routes the requested binary to the installer', async () => {
+  const { ui, installCalls } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer/install`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'herdr' }),
+  });
+  assert.equal(resp.status, 200);
+  assert.deepEqual(installCalls, ['herdr']);
+});
+
+test('GET /api/multiplexer without handlers returns 503', async () => {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/multiplexer`);
+  assert.equal(resp.status, 503);
+});
+
+test('GET /multiplexer serves the multiplexer settings page', async () => {
+  const { ui } = await uiWithMultiplexer();
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/multiplexer`);
+  assert.equal(resp.status, 200);
+  assert.match(resp.headers.get('content-type') ?? '', /text\/html/);
+  const body = await resp.text();
+  assert.ok(body.includes('Terminal Multiplexer'));
+  assert.ok(body.includes('/api/multiplexer'));
+});
+
 test('GET /api/pairing/consumed resolves true when notifyPairingConsumed fires', async () => {
   const ui = new WebUI();
   const port = await freePort();
@@ -136,4 +206,57 @@ test('GET /api/pairing/consumed resolves true when notifyPairingConsumed fires',
   const pending = fetch(`http://127.0.0.1:${ui.port}/api/pairing/consumed`).then(r => r.json());
   setTimeout(() => ui.notifyPairingConsumed(), 50);
   assert.deepEqual(await pending, { consumed: true });
+});
+
+async function startWebUi(deps: { isAttached: (sessionId: string) => boolean }) {
+  const ui = new WebUI();
+  const { PermissionBroker } = await import('./agent/permission-broker.js');
+  const broker = new PermissionBroker();
+  ui.setPermissionHandler({ broker, isAttached: deps.isAttached });
+  await ui.start(await freePort());
+  return {
+    url: `http://127.0.0.1:${ui.port}`,
+    broker,
+    stop: () => ui.stop(),
+  };
+}
+
+test('POST /api/agent/permission: no attached phone answers immediately with no decision', async () => {
+  const { url, stop } = await startWebUi({ isAttached: () => false });
+
+  const res = await fetch(`${url}/api/agent/permission`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 's1', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {});
+  await stop();
+});
+
+test('POST /api/agent/permission: an attached phone decision is returned', async () => {
+  const { url, broker, stop } = await startWebUi({ isAttached: () => true });
+  broker.onRequest((req) => broker.resolve(req.requestId, 'allow'));
+
+  const res = await fetch(`${url}/api/agent/permission`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 's1', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }),
+  });
+
+  assert.deepEqual(await res.json(), { behavior: 'allow' });
+  await stop();
+});
+
+test('POST /api/agent/permission: a malformed body yields no decision rather than an error', async () => {
+  const { url, stop } = await startWebUi({ isAttached: () => true });
+
+  const res = await fetch(`${url}/api/agent/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: 'not json',
+  });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {});
+  await stop();
 });

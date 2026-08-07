@@ -1,22 +1,115 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTmuxShellArgs } from './ttyd-manager.js';
+import { buildMultiplexerShellArgs, stripNestingEnv, wrapperSignature } from './ttyd-manager.js';
 
-test('buildTmuxShellArgs: passes $1 through tmux new-session -A with tc_ prefix', () => {
-  const args = buildTmuxShellArgs('/bin/zsh', '/usr/bin/tmux');
+const base = {
+  shell: '/bin/zsh',
+  tmuxPath: '/usr/bin/tmux',
+  herdrPath: '/home/u/.termcast/bin/herdr',
+  sidecarPath: '/home/u/.ttyd-server/multiplexer',
+  fallback: 'tmux' as const,
+};
+
+test('buildMultiplexerShellArgs: $1 is the phone id, $2 the multiplexer', () => {
+  const args = buildMultiplexerShellArgs(base);
   assert.equal(args[0], '/bin/zsh');
   assert.equal(args[1], '-c');
+  assert.equal(args[3], 'termcast'); // $0 placeholder so url-args land in $1/$2
   const script = args[2];
-  // Default when no url-arg is provided (browser/local view).
   assert.match(script, /\$\{1:-shared\}/);
-  // Sanitizes and prefixes to match sessionNameFor(), using POSIX-portable
-  // `tr` rather than the bash-only `${s//pat/rep}` expansion, so the wrapper
-  // works when the shell is dash (/bin/sh on Debian/Ubuntu), busybox ash, etc.
-  assert.match(script, /tc_\$\(printf %s "\$s" \| tr -c 'A-Za-z0-9_' '_'\)/);
-  // MUST NOT use the bash-only pattern-substitution expansion.
+  assert.match(script, /\$\{2:-/);
+});
+
+test('buildMultiplexerShellArgs: $2 falls back to the sidecar file, then the default', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  assert.match(script, /cat '\/home\/u\/\.ttyd-server\/multiplexer' 2>\/dev\/null \|\| echo tmux/);
+});
+
+test('buildMultiplexerShellArgs: stays POSIX — tr, not bash pattern substitution', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  assert.match(script, /tr -c 'A-Za-z0-9_' '_'/);
   assert.doesNotMatch(script, /\$\{s\/\//);
+});
+
+test('buildMultiplexerShellArgs: tmux keeps the exact legacy session name', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  assert.match(script, /exec '\/usr\/bin\/tmux' new-session -A -s "tc_\$sname"/);
+});
+
+test('buildMultiplexerShellArgs: herdr attaches-or-creates its own namespace', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  assert.match(script, /herdr:\*\) exec '\/home\/u\/\.termcast\/bin\/herdr' --session "tch_\$sname"/);
+});
+
+test('buildMultiplexerShellArgs: none execs the bare shell', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  assert.match(script, /none:\*\) exec '\/bin\/zsh'/);
+});
+
+test('buildMultiplexerShellArgs: attach mode uses the session name verbatim, unprefixed and unsanitised', () => {
+  const script = buildMultiplexerShellArgs(base)[2];
+  // Attach mode ($3 = 1) skips the sanitisation prefix path entirely.
+  assert.match(script, /\$\{3:-\}/);
+  assert.match(script, /if \[ "\$a" = "1" \]; then sname="\$s"/);
+  // tmux and herdr attach branches take the raw name (no tc_/tch_ prefix).
+  assert.match(script, /\*:1\) exec '\/usr\/bin\/tmux' new-session -A -s "\$sname"/);
+  assert.match(script, /herdr:1\) exec '\/home\/u\/\.termcast\/bin\/herdr' --session "\$sname"/);
+});
+
+test('buildMultiplexerShellArgs: an unresolved binary gets no branch at all', () => {
+  const script = buildMultiplexerShellArgs({ ...base, herdrPath: null })[2];
+  assert.doesNotMatch(script, /herdr:1\)/);
+  assert.doesNotMatch(script, /herdr:\*\)/);
   assert.match(script, /new-session -A -s/);
-  assert.match(script, /\/usr\/bin\/tmux/);
-  // $0 placeholder so the first url-arg lands in $1.
-  assert.equal(args[3], 'termcast');
+});
+
+test('buildMultiplexerShellArgs: no tmux and no herdr degrades to a bare shell', () => {
+  const script = buildMultiplexerShellArgs({ ...base, tmuxPath: null, herdrPath: null })[2];
+  assert.doesNotMatch(script, /new-session/);
+  assert.match(script, /exec '\/bin\/zsh'/);
+});
+
+// Starting the server from inside a multiplexer is normal. If its nesting
+// markers reach ttyd, every connection dies on spawn: herdr exits 1 with
+// "nested herdr is disabled by default" (verified against v0.7.5) and tmux
+// refuses to nest a new session.
+test('stripNestingEnv: drops every herdr and tmux nesting marker', () => {
+  const cleaned = stripNestingEnv({
+    HERDR_ENV: '1',
+    HERDR_PANE_ID: 'w6:p1',
+    HERDR_SOCKET_PATH: '/Users/u/.config/herdr/herdr.sock',
+    HERDR_TAB_ID: 'w6:t1',
+    HERDR_WORKSPACE_ID: 'w6',
+    HERDR_STARTUP_CWD: '/Users/u',
+    TMUX: '/tmp/tmux-501/default,123,0',
+    TMUX_PANE: '%3',
+  });
+  assert.deepEqual(cleaned, {});
+});
+
+test('stripNestingEnv: leaves unrelated variables untouched and does not mutate its input', () => {
+  const env = { PATH: '/usr/bin', HOME: '/Users/u', TERM: 'xterm-256color', HERDR_ENV: '1' };
+  const cleaned = stripNestingEnv(env);
+  assert.deepEqual(cleaned, { PATH: '/usr/bin', HOME: '/Users/u', TERM: 'xterm-256color' });
+  assert.equal(env.HERDR_ENV, '1', 'process.env must not be mutated');
+});
+
+test('wrapperSignature: identical argv yields an identical fingerprint', () => {
+  const a = buildMultiplexerShellArgs(base);
+  const b = buildMultiplexerShellArgs(base);
+  assert.equal(wrapperSignature(a), wrapperSignature(b));
+  assert.match(wrapperSignature(a), /^[0-9a-f]{8}$/);
+});
+
+test('wrapperSignature: any binary change flips the fingerprint (stale-orphan guard)', () => {
+  const withTmux = wrapperSignature(buildMultiplexerShellArgs(base));
+  const tmuxGone = wrapperSignature(buildMultiplexerShellArgs({ ...base, tmuxPath: null, herdrPath: null }));
+  const herdrAdded = wrapperSignature(buildMultiplexerShellArgs({ ...base, herdrPath: '/home/u/.local/bin/herdr' }));
+  const shellChanged = wrapperSignature(buildMultiplexerShellArgs({ ...base, shell: '/bin/bash' }));
+  assert.notEqual(withTmux, tmuxGone);
+  assert.notEqual(withTmux, herdrAdded);
+  assert.notEqual(withTmux, shellChanged);
+  // The same args never collide regardless of how they were produced.
+  assert.equal(wrapperSignature(buildMultiplexerShellArgs({ ...base, herdrPath: '/home/u/.local/bin/herdr' })),
+    herdrAdded);
 });
