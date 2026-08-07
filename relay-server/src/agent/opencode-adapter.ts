@@ -1,4 +1,4 @@
-import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
+import type { AgentAdapter, AgentEvent, AgentQuestionOutcome, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
 import type { AgentMessage, AgentSessionSummary, AgentQuestionInfo, MessageBlock } from './types.js';
 import type { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEventStream } from './opencode-event-stream.js';
@@ -44,6 +44,8 @@ export class OpencodeAdapter implements AgentAdapter {
   private readonly inject: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
   private readonly watchStatus: (target: DeskTarget) => Promise<void>;
   private readonly deskQuestions: DeskQuestionWatcher;
+  /** sessionId → live chat sink, for resolutions the question API cannot raise. */
+  private readonly sinks = new Map<string, (event: AgentEvent) => void>();
   private eventSink: ((event: AgentEvent) => void) | null = null;
 
   constructor(
@@ -101,6 +103,10 @@ export class OpencodeAdapter implements AgentAdapter {
     // The HTTP transcript never carries a dialog the TUI drew in its own pane,
     // so this is the only way one reaches the phone.
     const stopQuestions = this.deskQuestions.watch('opencode', sessionId, onEvent);
+    // Kept so respondQuestion can resolve the card it just answered: the
+    // question API has no event of its own, so nothing else would tell the
+    // phone the card is finished.
+    this.sinks.set(sessionId, onEvent);
     let stopped = false;
     /** message id → fingerprint of what we last sent for it. */
     const sent = new Map<string, string>();
@@ -245,6 +251,7 @@ export class OpencodeAdapter implements AgentAdapter {
       streamUnsubscribe?.();
       connectionUnsubscribe?.();
       stopQuestions();
+      this.sinks.delete(sessionId);
     };
   }
 
@@ -315,6 +322,16 @@ export class OpencodeAdapter implements AgentAdapter {
     } else {
       await this.client.answerQuestion(requestId, answers ?? []);
     }
+    // After the call, never before: an answer that failed to reach opencode
+    // leaves the question live, and a card marked answered would be a lie.
+    this.resolveCard(requestId, rejected ? 'rejected' : 'answered', rejected ? undefined : answers);
+  }
+
+  /** Tell whichever chat is watching that a question is finished. */
+  private resolveCard(requestId: string, outcome: AgentQuestionOutcome, answers?: string[]): void {
+    for (const [sessionId, sink] of this.sinks) {
+      sink({ kind: 'questionResolved', sessionId, seq: 0, requestId, outcome, answers });
+    }
   }
 }
 
@@ -353,6 +370,11 @@ function parseQuestionToolUse(
   return {
     requestId: toolUseId, sessionId, agent: 'opencode',
     prompt, kind: options.length > 0 ? 'select' : 'freeform', options,
+    // The answer endpoint takes arbitrary strings, so free text is always
+    // deliverable. multiSelect is absent here on purpose: the block is a
+    // fallback for a transcript that raced the question API, and it carries no
+    // flag to read — a guess would render a radio group as checkboxes.
+    allowsOther: true,
     createdAt: new Date().toISOString(),
   };
 }

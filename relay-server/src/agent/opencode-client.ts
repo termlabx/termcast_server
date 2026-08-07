@@ -331,6 +331,12 @@ export class OpencodeClient {
           const opt = o as Record<string, unknown>;
           return { label: str(opt.label) ?? '', description: str(opt.description) ?? undefined };
         }),
+        // Absent rather than false, so the phone can tell "single answer" from
+        // "this server predates the field".
+        multiSelect: isMultiSelect(r) ? true : undefined,
+        // opencode's answer endpoint takes arbitrary strings, so an answer that
+        // is not on the list is always deliverable.
+        allowsOther: true,
         createdAt: str(r.createdAt) ?? new Date().toISOString(),
       };
     });
@@ -642,4 +648,17 @@ function str(value: unknown): string | null {
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+/**
+ * Whether a question accepts several answers.
+ *
+ * Three spellings are read because opencode's runtime JSON and its own `/doc`
+ * disagree often enough that committing to one is a bug waiting to happen (the
+ * message/part vs session_message split is the same story). Reading all three
+ * costs nothing; guessing wrong renders a multi-answer question as a radio
+ * group, which silently discards every choice but one.
+ */
+function isMultiSelect(raw: Record<string, unknown>): boolean {
+  return raw.multiple === true || raw.multiSelect === true || raw.multi === true;
 }

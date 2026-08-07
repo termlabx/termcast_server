@@ -516,3 +516,62 @@ test('answerQuestion: pins the opencode body to the nested [answers] shape', asy
     await s.stop();
   }
 });
+
+// --- question fidelity -----------------------------------------------------
+
+test('listQuestions: carries descriptions and multiSelect through', async () => {
+  const { url, stop } = await stub({
+    'GET /api/session/ses_abc/question': {
+      data: [{
+        requestId: 'q1',
+        prompt: 'Which approach?',
+        kind: 'select',
+        multiple: true,
+        options: [
+          { label: 'Rewrite', description: 'Slower but cleaner' },
+          { label: 'Patch' },
+        ],
+      }],
+    },
+  });
+
+  const client = new OpencodeClient(url, '/tmp');
+  const [question] = await client.listQuestions('ses_abc');
+  await stop();
+
+  assert.equal(question.multiSelect, true);
+  assert.equal(question.options[0].description, 'Slower but cleaner');
+  assert.equal(question.options[1].description, undefined);
+  // The answer endpoint takes arbitrary strings, so free text is always usable.
+  assert.equal(question.allowsOther, true);
+});
+
+// opencode's runtime JSON and its own /doc disagree about field names often
+// enough that guessing one spelling is a bug waiting to happen.
+test('listQuestions: accepts either spelling of the multi-select flag', async () => {
+  for (const key of ['multiple', 'multiSelect', 'multi']) {
+    const { url, stop } = await stub({
+      'GET /api/session/ses_abc/question': {
+        data: [{ requestId: 'q1', prompt: 'p', options: [{ label: 'A' }], [key]: true }],
+      },
+    });
+    const client = new OpencodeClient(url, '/tmp');
+    const [question] = await client.listQuestions('ses_abc');
+    await stop();
+    assert.equal(question.multiSelect, true, `expected ${key} to be read`);
+  }
+});
+
+test('listQuestions: a single-answer question omits multiSelect rather than sending false', async () => {
+  const { url, stop } = await stub({
+    'GET /api/session/ses_abc/question': {
+      data: [{ requestId: 'q1', prompt: 'p', options: [{ label: 'A' }] }],
+    },
+  });
+
+  const client = new OpencodeClient(url, '/tmp');
+  const [question] = await client.listQuestions('ses_abc');
+  await stop();
+
+  assert.equal(question.multiSelect, undefined);
+});
