@@ -73,6 +73,13 @@ export interface AgentSessionSummary {
 export interface AgentQuestionOption {
   label: string;
   description?: string;
+  /**
+   * 1-based row in the desk dialog this label maps to. Absent off-desk.
+   *
+   * Carrying it is what lets a correlated question key off position rather than
+   * re-matching labels, which a TUI truncates whenever they outrun the pane.
+   */
+  index?: number;
 }
 
 /**
@@ -93,8 +100,28 @@ export interface AgentQuestionInfo {
   sessionId: string;
   agent: AgentKind;
   prompt: string;
+  /** AskUserQuestion's short label, e.g. "Auth method". */
+  header?: string;
   kind: 'select' | 'freeform';
   options: AgentQuestionOption[];
+  /**
+   * Whether the far end genuinely accepts several answers. Absent means false.
+   *
+   * Before this field the phone guessed from `origin`, so every agent question
+   * rendered as checkboxes and every desk question as radios, regardless of
+   * what the agent actually asked for.
+   */
+  multiSelect?: boolean;
+  /** Free text accepted instead of a listed option; drives the "Other…" row. */
+  allowsOther?: boolean;
+  /**
+   * One AskUserQuestion call carries up to four questions. They share a
+   * groupId so the phone can show "2 of 3" and the caller knows the tool result
+   * is not complete until every member has been answered.
+   */
+  groupId?: string;
+  groupIndex?: number;
+  groupCount?: number;
   createdAt: string;
   /** Absent means `agent`; see AgentQuestionOrigin. */
   origin?: AgentQuestionOrigin;
