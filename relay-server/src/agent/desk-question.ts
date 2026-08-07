@@ -109,6 +109,10 @@ export class DeskQuestionWatcher {
       kind: dialog.kind,
       options: dialog.options.map((option) => ({ label: option.label })),
       createdAt: new Date().toISOString(),
+      // The phone renders this as a radio group rather than checkboxes: the
+      // answer is one keystroke, and a second tick would silently pick whichever
+      // label happened to come first.
+      origin: 'desk',
     };
 
     this.pending.set(requestId, {

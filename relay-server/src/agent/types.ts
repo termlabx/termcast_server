@@ -75,6 +75,19 @@ export interface AgentQuestionOption {
   description?: string;
 }
 
+/**
+ * Where a question came from, which decides how the phone must present it.
+ *
+ * `desk` is a dialog the agent drew in a pane at the user's keyboard: it is
+ * answered with a single keystroke, so exactly one option can be picked and
+ * declining means pressing Escape over there. `agent` is a question the agent
+ * asked through its own tooling, which has always allowed several answers.
+ *
+ * Optional: a phone that predates it treats every question as `agent`, which is
+ * the behaviour it already had.
+ */
+export type AgentQuestionOrigin = 'desk' | 'agent';
+
 export interface AgentQuestionInfo {
   requestId: string;
   sessionId: string;
@@ -83,6 +96,8 @@ export interface AgentQuestionInfo {
   kind: 'select' | 'freeform';
   options: AgentQuestionOption[];
   createdAt: string;
+  /** Absent means `agent`; see AgentQuestionOrigin. */
+  origin?: AgentQuestionOrigin;
 }
 
 export interface AgentQuestion extends AgentQuestionInfo {

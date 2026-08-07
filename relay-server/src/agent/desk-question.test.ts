@@ -97,6 +97,10 @@ test('emits one question when the desk agent is blocked, and does not repeat it'
   assert.equal(request.agent, 'claude');
   assert.deepEqual(request.options.map((o) => o.label), ['Yes', 'No, and tell Claude what to do']);
   assert.match(request.prompt, /Do you want to proceed\?/);
+  // The phone keys its radio-vs-checkbox presentation off this. A desk dialog
+  // is answered with one keystroke, so a multi-select card would let the user
+  // tick two options and send whichever the set happened to order first.
+  assert.equal(request.origin, 'desk');
 });
 
 test('emits nothing while the desk agent is working', async () => {
