@@ -1,4 +1,5 @@
 import type { AgentMessage, MessageBlock, MessageRole } from './types.js';
+import { parseAskUserQuestion, type ParsedQuestion } from './ask-user-question.js';
 
 /**
  * Parse a Claude Code transcript into normalized messages.
@@ -311,4 +312,51 @@ function basename(path: string): string {
 function oneLine(text: string): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   return collapsed.length > 80 ? `${collapsed.slice(0, 79)}…` : collapsed;
+}
+
+/**
+ * The newest `AskUserQuestion` in a transcript that has no result yet — i.e.
+ * the one currently on screen.
+ *
+ * Deliberately reads the raw lines rather than the parsed blocks. `parseEntry`
+ * clamps every tool input to MAX_BLOCK_CHARS for the chat bubble's sake, and
+ * 22% of real AskUserQuestion calls exceed it, so the clamped copy would lose
+ * options on exactly the option-rich questions this is worth reading for.
+ *
+ * Scanning backwards matters too: a session that asked three questions has
+ * three tool_use entries and the older two are answered. Offering an answered
+ * question's options against the live dialog is the wrong-option bug that
+ * correlation exists to prevent.
+ */
+export function latestAskUserQuestionIn(lines: string[]): ParsedQuestion | null {
+  const answered = new Set<string>();
+  const calls: { id: string; input: unknown }[] = [];
+
+  for (const line of lines) {
+    if (!line) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const content = (entry as { message?: { content?: unknown } }).message?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const item of content) {
+      if (typeof item !== 'object' || item === null) continue;
+      const block = item as Record<string, unknown>;
+      if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+        answered.add(block.tool_use_id);
+      } else if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
+        calls.push({ id: typeof block.id === 'string' ? block.id : '', input: block.input });
+      }
+    }
+  }
+
+  for (let i = calls.length - 1; i >= 0; i--) {
+    if (answered.has(calls[i].id)) continue;
+    return parseAskUserQuestion(calls[i].input)[0] ?? null;
+  }
+  return null;
 }

@@ -1,9 +1,11 @@
 import { join } from 'node:path';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import type { AgentAdapter, AgentEvent, HistoryPage, PermissionBehavior, Unsubscribe } from './adapter.js';
 import type { AgentSessionSummary } from './types.js';
 import { discoverClaudeSessions, defaultProjectsRoot } from './claude-discovery.js';
 import { readMessagesSince, TranscriptTail } from './claude-tail.js';
+import { latestAskUserQuestionIn } from './claude-transcript.js';
+import type { ParsedQuestion } from './ask-user-question.js';
 import { ClaudeSdkSession } from './claude-sdk-session.js';
 import { HerdrAgentCli } from './herdr-agent-cli.js';
 import { SessionLiveness } from './session-liveness.js';
@@ -73,6 +75,8 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly inject: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
   private readonly watchStatus: (target: DeskTarget) => Promise<void>;
   private readonly deskQuestions: DeskQuestionWatcher;
+  /** Newest seq seen per session, so a desk card lands at the transcript tail. */
+  private readonly tailSeq = new Map<string, number>();
 
   constructor(
     private readonly projectsRoot: string = defaultProjectsRoot(),
@@ -83,7 +87,31 @@ export class ClaudeAdapter implements AgentAdapter {
     this.liveness = deps.liveness ?? new SessionLiveness();
     this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
     this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));
-    this.deskQuestions = deps.deskQuestions ?? new DeskQuestionWatcher(cli, this.desk);
+    this.deskQuestions = deps.deskQuestions ?? new DeskQuestionWatcher(cli, this.desk, {
+      latestAskUserQuestion: (sessionId) => this.latestAskUserQuestion(sessionId),
+      seqFor: (sessionId) => this.tailSeq.get(sessionId) ?? 0,
+    });
+  }
+
+  /**
+   * The structured question behind the dialog currently on the pane, when the
+   * transcript has one.
+   *
+   * Only reached once per newly-seen dialog — the watcher checks the
+   * fingerprint first — so a file read here is cheap, and it is the only way to
+   * get an input the block clamp would otherwise truncate.
+   */
+  private async latestAskUserQuestion(sessionId: string): Promise<ParsedQuestion | null> {
+    const path = await this.transcriptLookup(sessionId);
+    if (!path) return null;
+    try {
+      const text = await readFile(path, 'utf8');
+      return latestAskUserQuestionIn(text.split('\n'));
+    } catch {
+      // A transcript that vanished or is mid-write is not an error here: the
+      // pane's own options are still a correct answer, just a plainer one.
+      return null;
+    }
   }
 
   /** Test seam. Production uses the default ClaudeSdkSession factory. */
@@ -129,11 +157,13 @@ export class ClaudeAdapter implements AgentAdapter {
       return stopQuestions;
     }
 
+    this.tailSeq.set(sessionId, sinceSeq);
     const tail = new TranscriptTail(path, sinceSeq, (message) => {
+      this.tailSeq.set(sessionId, message.seq);
       onEvent({ kind: 'message', sessionId, seq: message.seq, message });
     });
     tail.start();
-    return () => { tail.stop(); stopQuestions(); };
+    return () => { tail.stop(); stopQuestions(); this.tailSeq.delete(sessionId); };
   }
 
   async send(sessionId: string, text: string): Promise<void> {

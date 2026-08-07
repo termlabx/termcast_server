@@ -5,6 +5,7 @@ import { parseDeskDialog } from './desk-dialog.js';
 import type { AgentEvent } from './adapter.js';
 import type { HerdrAgentCli } from './herdr-agent-cli.js';
 import type { DeskRegistry, DeskTarget } from './desk-target.js';
+import type { ParsedQuestion } from './ask-user-question.js';
 
 const NUMBERED_DIALOG = [
   '─'.repeat(60),
@@ -315,5 +316,174 @@ test('answerKeys: an explicit cursor override wins over the pane row', () => {
   assert.ok(dialog);
   // Correlation supplies the absolute position on a windowed list, where the
   // pane's own index counts only within the visible window.
-  assert.deepEqual(answerKeys(dialog, ['Option 11'], false, 10), ['down', 'enter']);
+  assert.deepEqual(
+    answerKeys(dialog, ['Option 11'], false, {
+      options: Array.from({ length: 12 }, (_, i) => ({ label: `Option ${i + 1}`, index: i + 1 })),
+      cursorIndex: 10,
+    }),
+    ['down', 'enter'],
+  );
+});
+
+// --- structured correlation and resolutions --------------------------------
+
+const RICH_DIALOG = [
+  '─'.repeat(60),
+  '  Which database should the new service use?',
+  '',
+  '  ❯ 1. Postgres, because the rest of the stack alr…',
+  '    2. SQLite',
+  '',
+  '  Enter to confirm · Esc to cancel',
+].join('\n');
+
+const RICH_STRUCTURED: ParsedQuestion = {
+  prompt: 'Which database should the new service use?',
+  header: 'Database',
+  // The tool said several answers are fine. A desk dialog still takes one key.
+  multiSelect: true,
+  options: [
+    { label: 'Postgres, because the rest of the stack already uses it', description: 'Relational' },
+    { label: 'SQLite', description: 'Single file' },
+  ],
+};
+
+async function collectWith(
+  cli: HerdrAgentCli,
+  desk: DeskRegistry,
+  opts: { latestAskUserQuestion?: () => ParsedQuestion | null; seqFor?: () => number; pollMs?: number },
+): Promise<{ watcher: DeskQuestionWatcher; events: AgentEvent[]; stop: () => void }> {
+  const watcher = new DeskQuestionWatcher(cli, desk, { pollMs: opts.pollMs ?? ONE_POLL, ...opts });
+  const events: AgentEvent[] = [];
+  const stop = watcher.watch('claude', 's1', (event) => events.push(event));
+  await flush();
+  return { watcher, events, stop };
+}
+
+function resolutionsIn(events: AgentEvent[]): Extract<AgentEvent, { kind: 'questionResolved' }>[] {
+  return events.filter(
+    (e): e is Extract<AgentEvent, { kind: 'questionResolved' }> => e.kind === 'questionResolved',
+  );
+}
+
+test('a correlated desk question gains descriptions and untruncated labels', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: RICH_DIALOG, keys: [] };
+  const { events, stop } = await collectWith(fakeCli(state), fakeDesk(herdrTarget('blocked')), {
+    latestAskUserQuestion: () => RICH_STRUCTURED,
+  });
+  stop();
+
+  const [question] = questionsIn(events);
+  assert.ok(question);
+  assert.equal(question.request.options[0].label,
+    'Postgres, because the rest of the stack already uses it');
+  assert.equal(question.request.options[0].description, 'Relational');
+  assert.equal(question.request.header, 'Database');
+});
+
+test('a correlated desk question stays single-select whatever the tool asked for', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: RICH_DIALOG, keys: [] };
+  const { events, stop } = await collectWith(fakeCli(state), fakeDesk(herdrTarget('blocked')), {
+    latestAskUserQuestion: () => RICH_STRUCTURED,
+  });
+  stop();
+
+  // One keystroke answers a desk dialog. Honouring multiSelect here would send
+  // whichever label the set happened to order first.
+  assert.equal(questionsIn(events)[0].request.multiSelect, undefined);
+  assert.equal(questionsIn(events)[0].request.allowsOther, undefined);
+});
+
+test('a mismatch falls back to the pane options rather than blending', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: RICH_DIALOG, keys: [] };
+  const { events, stop } = await collectWith(fakeCli(state), fakeDesk(herdrTarget('blocked')), {
+    latestAskUserQuestion: () => ({
+      prompt: 'A different question entirely',
+      multiSelect: false,
+      options: [{ label: 'Yes' }, { label: 'No' }],
+    }),
+  });
+  stop();
+
+  const [question] = questionsIn(events);
+  assert.deepEqual(question.request.options.map((o) => o.label), [
+    'Postgres, because the rest of the stack alr…',
+    'SQLite',
+  ]);
+  assert.equal(question.request.options[0].description, undefined);
+});
+
+test('a question carries the session tail seq, not -1', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: NUMBERED_DIALOG, keys: [] };
+  const { events, stop } = await collectWith(fakeCli(state), fakeDesk(herdrTarget('blocked')), {
+    seqFor: () => 57,
+  });
+  stop();
+
+  // seq -1 sorts a desk question above the whole transcript once cards are
+  // placed inline by seq.
+  assert.equal(questionsIn(events)[0].seq, 57);
+});
+
+test('answering resolves the card', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: NUMBERED_DIALOG, keys: [] };
+  const { watcher, events, stop } = await collectWith(
+    fakeCli(state), fakeDesk(herdrTarget('blocked')), {},
+  );
+  const requestId = questionsIn(events)[0].request.requestId;
+  // The desk reacts the moment the keys land, so status moves after the call.
+  const answered = watcher.respond(requestId, ['Yes']);
+  state.status = 'working';
+  assert.equal(await answered, true);
+  stop();
+
+  const [resolved] = resolutionsIn(events);
+  assert.ok(resolved);
+  assert.equal(resolved.outcome, 'answered');
+  assert.deepEqual(resolved.answers, ['Yes']);
+});
+
+test('answering at the desk first resolves the card as answered_elsewhere', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: NUMBERED_DIALOG, keys: [] };
+  const { watcher, events, stop } = await collectWith(
+    fakeCli(state), fakeDesk(herdrTarget('blocked')), {},
+  );
+  const requestId = questionsIn(events)[0].request.requestId;
+
+  // The pane moved on while the phone was deciding.
+  state.seq = 8;
+  await assert.rejects(() => watcher.respond(requestId, ['Yes']));
+  stop();
+
+  const [resolved] = resolutionsIn(events);
+  assert.ok(resolved);
+  assert.equal(resolved.outcome, 'answered_elsewhere');
+  // Nothing was sent, which is the whole point of the guard.
+  assert.deepEqual(state.keys, []);
+});
+
+test('a second answer for the same id is a no-op, not a second keystroke', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: NUMBERED_DIALOG, keys: [] };
+  const { watcher, events, stop } = await collectWith(
+    fakeCli(state), fakeDesk(herdrTarget('blocked')), {},
+  );
+  const requestId = questionsIn(events)[0].request.requestId;
+  const answered = watcher.respond(requestId, ['Yes']);
+  state.status = 'working';
+  assert.equal(await answered, true);
+  // The id is claimed on the first call, so a double tap finds nothing to send.
+  assert.equal(await watcher.respond(requestId, ['Yes']), false);
+  stop();
+
+  assert.equal(state.keys.length, 1);
+});
+
+test('closing the chat resolves anything still pending as unavailable', async () => {
+  const state: FakeState = { status: 'blocked', seq: 7, pane: NUMBERED_DIALOG, keys: [] };
+  const { events, stop } = await collectWith(fakeCli(state), fakeDesk(herdrTarget('blocked')), {});
+  stop();
+
+  const [resolved] = resolutionsIn(events);
+  assert.ok(resolved);
+  assert.equal(resolved.outcome, 'unavailable');
 });

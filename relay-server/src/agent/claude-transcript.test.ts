@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTranscript, sessionMetaFromTranscript } from './claude-transcript.js';
+import { parseTranscript, sessionMetaFromTranscript, latestAskUserQuestionIn } from './claude-transcript.js';
 
 /**
  * Line shapes here are copied from a real Claude Code transcript, trimmed to
@@ -376,4 +376,77 @@ test('sessionMetaFromTranscript: an interruption notice alone is not a human tur
   ]);
 
   assert.equal(meta.userInitiated, false);
+});
+
+// --- AskUserQuestion lookup ------------------------------------------------
+
+function toolUseLine(id: string, input: unknown): string {
+  return JSON.stringify({
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input }] },
+  });
+}
+
+function toolResultLine(id: string): string {
+  return JSON.stringify({
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'done' }] },
+  });
+}
+
+const CALL = {
+  questions: [{
+    question: 'Which database?',
+    header: 'DB',
+    options: [{ label: 'Postgres', description: 'Relational' }, { label: 'SQLite' }],
+  }],
+};
+
+test('latestAskUserQuestionIn: finds an unanswered call with its full input', () => {
+  const parsed = latestAskUserQuestionIn([toolUseLine('t1', CALL)]);
+
+  assert.ok(parsed);
+  assert.equal(parsed.prompt, 'Which database?');
+  assert.equal(parsed.options[0].description, 'Relational');
+});
+
+// An answered question's options against the live dialog is exactly the
+// wrong-option bug correlation exists to prevent.
+test('latestAskUserQuestionIn: skips a call that already has a result', () => {
+  assert.equal(latestAskUserQuestionIn([toolUseLine('t1', CALL), toolResultLine('t1')]), null);
+});
+
+test('latestAskUserQuestionIn: prefers the newest unanswered call', () => {
+  const older = { questions: [{ question: 'Older?', options: [{ label: 'A' }] }] };
+  const parsed = latestAskUserQuestionIn([
+    toolUseLine('t1', older),
+    toolResultLine('t1'),
+    toolUseLine('t2', CALL),
+  ]);
+
+  assert.equal(parsed?.prompt, 'Which database?');
+});
+
+test('latestAskUserQuestionIn: ignores other tools and malformed lines', () => {
+  const otherTool = JSON.stringify({
+    message: { role: 'assistant', content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'ls' } }] },
+  });
+
+  assert.equal(latestAskUserQuestionIn([otherTool, 'not json', '']), null);
+});
+
+// The reason this reads raw lines rather than parsed blocks: 22% of real calls
+// exceed MAX_BLOCK_CHARS, and a clamped input loses options.
+test('latestAskUserQuestionIn: reads an input far larger than the block clamp', () => {
+  const big = {
+    questions: [{
+      question: 'Pick',
+      options: Array.from({ length: 4 }, (_, i) => ({
+        label: `Option ${i + 1}`,
+        description: 'x'.repeat(900),
+      })),
+    }],
+  };
+  const parsed = latestAskUserQuestionIn([toolUseLine('t1', big)]);
+
+  assert.equal(parsed?.options.length, 4);
+  assert.equal(parsed?.options[3].description?.length, 900);
 });
