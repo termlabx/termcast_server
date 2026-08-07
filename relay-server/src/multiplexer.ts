@@ -153,17 +153,29 @@ function shellQuote(value: string): string {
  *
  * herdr v0.7.5 has no `session send`; the verified form is `herdr agent prompt
  * <target> <text>`, which submits a prompt to the agent in that session.
+ *
+ * `binary` defaults to resolving the real path rather than trusting PATH: the
+ * daemon is spawned by the desktop app with the bare login PATH, which excludes
+ * ~/.termcast/bin, and a machine whose only tmux is the bundled
+ * tmux-darwin-arm64 has nothing named plain `tmux` at all.
  */
-export function sendKeysCommand(sessionName: string, text: string, mux: Multiplexer): string | null {
+export function sendKeysCommand(
+  sessionName: string,
+  text: string,
+  mux: Multiplexer,
+  binary?: string,
+): string | null {
   if (!text.trim()) return null;
   const target = shellQuote(sessionName);
   const body = shellQuote(text);
 
   if (mux === 'tmux') {
-    return `tmux send-keys -t ${target} -l ${body} && tmux send-keys -t ${target} Enter`;
+    const tmux = shellQuote(binary ?? resolveMultiplexerBinary('tmux') ?? 'tmux');
+    return `${tmux} send-keys -t ${target} -l ${body} && ${tmux} send-keys -t ${target} Enter`;
   }
   if (mux === 'herdr') {
-    return `herdr agent prompt ${target} ${body}`;
+    const herdr = shellQuote(binary ?? resolveMultiplexerBinary('herdr') ?? 'herdr');
+    return `${herdr} agent prompt ${target} ${body}`;
   }
   return null;
 }

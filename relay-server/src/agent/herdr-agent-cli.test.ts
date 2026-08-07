@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HerdrAgentCli, type HerdrRunner } from './herdr-agent-cli.js';
+import { HerdrAgentCli, herdrCommand, type HerdrRunner } from './herdr-agent-cli.js';
 
 /** Verbatim shape from `herdr agent list` on herdr 0.7.5, trimmed to three agents. */
 const LIST_FIXTURE = JSON.stringify({
@@ -112,4 +112,22 @@ test('prompt: a herdr error payload rejects with its message', async () => {
   const body = JSON.stringify({ error: { code: 'agent_prompt_stalled', message: 'agent did not change state' }, id: 'cli:agent:prompt' });
   const cli = new HerdrAgentCli(runnerFor(body));
   await assert.rejects(() => cli.prompt('w3:p2', 'hi'), /agent_prompt_stalled/);
+});
+
+// The daemon is launched by the desktop app, whose PATH is the bare login set:
+// /usr/local/bin:/opt/homebrew/bin:/usr/bin:... It does NOT include
+// ~/.termcast/bin or ~/.local/bin, where the herdr installers put the binary.
+// Spawning bare 'herdr' there is ENOENT, which surfaced as every herdr-hosted
+// session being unreachable while tmux (on /opt/homebrew/bin) worked.
+test('herdrCommand: prefers the resolved binary over a bare PATH lookup', () => {
+  assert.equal(
+    herdrCommand(() => '/Users/x/.termcast/bin/herdr'),
+    '/Users/x/.termcast/bin/herdr',
+  );
+});
+
+test('herdrCommand: falls back to the PATH name when nothing resolves', () => {
+  // Better a PATH lookup that might work than a guaranteed ENOENT on a path
+  // we invented.
+  assert.equal(herdrCommand(() => null), 'herdr');
 });

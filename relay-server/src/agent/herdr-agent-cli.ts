@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveMultiplexerBinary } from '../multiplexer.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,8 +24,26 @@ export interface HerdrAgent {
 /** Test seam: argv in, captured output out. Production runs the real binary. */
 export type HerdrRunner = (args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
+/**
+ * The herdr binary to spawn.
+ *
+ * Never a bare 'herdr': the daemon is started by the desktop app, whose PATH is
+ * the bare login set (/usr/local/bin:/opt/homebrew/bin:/usr/bin:...) and does
+ * not include ~/.termcast/bin or ~/.local/bin, where the installers put it.
+ * Relying on PATH there is ENOENT, which made every herdr-hosted session
+ * unreachable while tmux — which happens to sit on /opt/homebrew/bin — worked.
+ *
+ * Resolved per call, not once at import, so installing herdr mid-session takes
+ * effect without a restart.
+ */
+export function herdrCommand(
+  resolve: (mux: 'tmux' | 'herdr') => string | null = resolveMultiplexerBinary,
+): string {
+  return resolve('herdr') ?? 'herdr';
+}
+
 const defaultRunner: HerdrRunner = (args) =>
-  execFileAsync('herdr', args, { timeout: HERDR_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 });
+  execFileAsync(herdrCommand(), args, { timeout: HERDR_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 });
 
 /**
  * Thin typed shell over `herdr agent`.

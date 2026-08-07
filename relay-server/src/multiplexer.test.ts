@@ -87,9 +87,11 @@ test('describeMultiplexerStatus: none needs no binary, so it is never "not insta
 });
 
 test('sendKeysCommand: tmux sends the literal text then Enter', () => {
-  const command = sendKeysCommand('tc_p1', 'hello world', 'tmux');
+  // Binary passed explicitly so the assertion stays exact; production resolves
+  // it rather than trusting the daemon's PATH.
+  const command = sendKeysCommand('tc_p1', 'hello world', 'tmux', '/bin/tmux');
 
-  assert.equal(command, "tmux send-keys -t 'tc_p1' -l 'hello world' && tmux send-keys -t 'tc_p1' Enter");
+  assert.equal(command, "'/bin/tmux' send-keys -t 'tc_p1' -l 'hello world' && '/bin/tmux' send-keys -t 'tc_p1' Enter");
 });
 
 test('sendKeysCommand: single quotes in the text cannot break out of the shell quoting', () => {
@@ -123,4 +125,19 @@ test('parseMultiplexer: the wrapper script sidecar still parses leniently', () =
   assert.equal(parseMultiplexer(''), 'tmux');
   assert.equal(parseMultiplexer('herdr'), 'herdr');
   assert.equal(parseMultiplexer('nonsense'), 'tmux');
+});
+
+test('sendKeysCommand: takes an explicit binary so injection never depends on PATH', () => {
+  // The daemon inherits the desktop app's bare PATH. A machine whose only tmux
+  // is termcast's bundled tmux-darwin-arm64 has nothing named `tmux` on it, so
+  // a bare name is ENOENT and the send silently does nothing.
+  const command = sendKeysCommand('%3', 'hi', 'tmux', '/opt/homebrew/bin/tmux');
+
+  assert.ok(command?.startsWith("'/opt/homebrew/bin/tmux' send-keys"), command ?? 'null');
+  assert.ok(!/(^|[^\/])\btmux send-keys/.test(command!), 'must not fall back to a bare name');
+});
+
+test('sendKeysCommand: herdr also takes its resolved binary', () => {
+  const command = sendKeysCommand('w3:p2', 'hi', 'herdr', '/Users/x/.termcast/bin/herdr');
+  assert.ok(command?.startsWith("'/Users/x/.termcast/bin/herdr' agent prompt"), command ?? 'null');
 });
