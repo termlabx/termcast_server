@@ -9,6 +9,7 @@ import { HerdrAgentCli } from './herdr-agent-cli.js';
 import { SessionLiveness } from './session-liveness.js';
 import { defaultDeskRegistry, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
 import { injectPrompt, waitUntilSettled } from './desk-inject.js';
+import { DeskQuestionWatcher } from './desk-question.js';
 
 /** The slice of ClaudeSdkSession the adapter depends on, so tests can substitute it. */
 export interface SdkSessionLike {
@@ -54,6 +55,7 @@ export interface ClaudeAdapterDeps {
   cli?: HerdrAgentCli;
   inject?: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
   watchStatus?: (target: DeskTarget) => Promise<void>;
+  deskQuestions?: DeskQuestionWatcher;
 }
 
 export class ClaudeAdapter implements AgentAdapter {
@@ -70,6 +72,7 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly liveness: SessionLiveness;
   private readonly inject: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
   private readonly watchStatus: (target: DeskTarget) => Promise<void>;
+  private readonly deskQuestions: DeskQuestionWatcher;
 
   constructor(
     private readonly projectsRoot: string = defaultProjectsRoot(),
@@ -80,6 +83,7 @@ export class ClaudeAdapter implements AgentAdapter {
     this.liveness = deps.liveness ?? new SessionLiveness();
     this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
     this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));
+    this.deskQuestions = deps.deskQuestions ?? new DeskQuestionWatcher(cli, this.desk);
   }
 
   /** Test seam. Production uses the default ClaudeSdkSession factory. */
@@ -113,17 +117,23 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async subscribe(sessionId: string, sinceSeq: number, onEvent: (event: AgentEvent) => void): Promise<Unsubscribe> {
+    // A dialog the agent draws in its pane is never written to the transcript,
+    // so the tail alone cannot see one. The watcher runs alongside it — and
+    // starts even when no transcript is found, because a session can be live in
+    // a pane before its JSONL is discoverable.
+    const stopQuestions = this.deskQuestions.watch('claude', sessionId, onEvent);
+
     const path = await transcriptPathFor(this.projectsRoot, sessionId);
     if (!path) {
       onEvent({ kind: 'status', sessionId, seq: sinceSeq, status: 'ended', detail: 'transcript not found' });
-      return () => {};
+      return stopQuestions;
     }
 
     const tail = new TranscriptTail(path, sinceSeq, (message) => {
       onEvent({ kind: 'message', sessionId, seq: message.seq, message });
     });
     tail.start();
-    return () => tail.stop();
+    return () => { tail.stop(); stopQuestions(); };
   }
 
   async send(sessionId: string, text: string): Promise<void> {
@@ -132,8 +142,18 @@ export class ClaudeAdapter implements AgentAdapter {
     // A session that is reachable belongs to whoever is at the desk: drive the
     // real pane rather than starting a second agent against the same repo.
     if (target) {
+      // working and blocked are opposites from the user's point of view —
+      // working means wait, blocked means you are the thing it is waiting for —
+      // so they no longer collapse into one refusal. The dialog itself arrives
+      // as a question event; this points at it rather than typing into a pane
+      // that is not accepting a prompt.
+      if (target.status === 'blocked') {
+        throw new Error(
+          'That session is waiting on your answer at the desk — answer the prompt shown here, then send again.',
+        );
+      }
       if (!isInjectable(target.status)) {
-        throw new Error('That session is busy at the desk — it is still working or waiting on you.');
+        throw new Error('That session is busy at the desk — it is still working.');
       }
       await this.inject(target.paneId, text, target.mux);
       // The transcript tail streams the reply but never announces the end of a
@@ -193,6 +213,9 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async respondQuestion(requestId: string, answers?: string[], rejected?: boolean): Promise<void> {
+    // Desk dialogs first; an id the watcher does not own keeps travelling to
+    // the SDK sessions, which hold their own resolvers.
+    if (await this.deskQuestions.respond(requestId, answers, rejected)) return;
     for (const session of this.sdkSessions.values()) {
       if (session.resolveQuestion(requestId, answers, rejected)) return;
     }

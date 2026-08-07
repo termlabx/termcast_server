@@ -11,6 +11,7 @@ import type { AgentEvent } from './adapter.js';
 import type { AgentMessage, AgentQuestionInfo } from './types.js';
 import { SessionLiveness } from './session-liveness.js';
 import type { DeskRegistry, DeskTarget, DeskEntry } from './desk-target.js';
+import type { DeskQuestionWatcher } from './desk-question.js';
 
 const deskWith = (target: DeskTarget | null): DeskRegistry => ({
   async lookup() { return target; },
@@ -187,6 +188,30 @@ test('ClaudeAdapter.send: a watcher that throws still ends the turn', async () =
   await new Promise((r) => setTimeout(r, 50));
 
   assert.deepEqual(statuses, ['turn_end']);
+});
+
+// The failure this whole change exists for: a prompt herdr typed but never
+// submitted used to reach the phone as a delivered message *and* a finished
+// turn. The send must reject, and — since it never started one — must not
+// announce a turn ending either.
+test('ClaudeAdapter.send: a prompt that was not submitted rejects and ends no turn', async () => {
+  const root = claudeRoot('s1', [line('one')]);
+  const statuses: string[] = [];
+
+  const adapter = new ClaudeAdapter(root, {
+    desk: deskWith({ paneId: 'wB:p1', mux: 'herdr', status: 'idle' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('not submitted'); },
+    watchStatus: async () => { throw new Error('the watcher must never start'); },
+  });
+  adapter.setEventSink((event) => {
+    if (event.kind === 'status') statuses.push(event.status);
+  });
+
+  await assert.rejects(() => adapter.send('s1', 'hello'), /not submitted/);
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.deepEqual(statuses, []);
 });
 
 test('ClaudeAdapter.send: a busy desk agent reports rather than interleaving', async () => {
@@ -496,6 +521,45 @@ test('OpencodeAdapter.subscribe: an unavailable stream falls back to the poll an
   assert.ok(client.calls >= 2, 'no stream available → the backstop poll still reads');
 });
 
+// A desk-hosted session runs its turns in the *TUI's* opencode process. That
+// process has its own event bus, so our /api/event socket — however healthy —
+// carries nothing for it. Gating the fast poll on socket health left the 15 s
+// safety poll as the only refresh, which is why a reply that streams at the
+// laptop arrived on the phone in one lump.
+test('OpencodeAdapter.subscribe: a desk-routed session polls fast even on a healthy stream', async () => {
+  const client = countingTranscript();
+  const stream = streamStub();
+  const adapter = new OpencodeAdapter(
+    client as unknown as OpencodeClient,
+    stream as unknown as OpencodeEventStream,
+    { desk: deskWith({ paneId: 'w3:p1', mux: 'herdr', status: 'idle' }) },
+  );
+
+  const stop = await adapter.subscribe('ses_abc', -1, () => {});
+  await new Promise((r) => setTimeout(r, 1200));
+  stop();
+
+  assert.ok(client.calls >= 2, 'no live event source for this session → poll it');
+});
+
+test('OpencodeAdapter.subscribe: a headless session on a healthy stream still does not poll', async () => {
+  // The stream is authoritative here, and a 1 s poll per attached phone is a
+  // cost with no payer.
+  const client = countingTranscript();
+  const stream = streamStub();
+  const adapter = new OpencodeAdapter(
+    client as unknown as OpencodeClient,
+    stream as unknown as OpencodeEventStream,
+    { desk: deskWith(null) },
+  );
+
+  const stop = await adapter.subscribe('ses_abc', -1, () => {});
+  await new Promise((r) => setTimeout(r, 1200));
+  stop();
+
+  assert.equal(client.calls, 1, 'only the initial fill');
+});
+
 test('claude send: injects into the desk pane when the session is idle there', async () => {
   const injected: Array<{ paneId: string; text: string }> = [];
   const adapter = new ClaudeAdapter('/projects', {
@@ -519,14 +583,45 @@ test('claude send: refuses while the desk agent is working', async () => {
   await assert.rejects(() => adapter.send('s1', 'hello123'), /busy at the desk/);
 });
 
-test('claude send: refuses while the desk agent is blocked on a permission', async () => {
+// working and blocked are opposites from the user's point of view: working
+// means wait, blocked means the agent is waiting on *you*. The dialog itself
+// arrives as a question, so the refusal points at it rather than saying "busy".
+test('claude send: a blocked desk agent is refused with the reason, not as busy', async () => {
   const adapter = new ClaudeAdapter('/projects', {
     desk: deskWith({ paneId: 'w1:p1', mux: 'herdr', status: 'blocked' }),
     liveness: livenessOf(true),
     inject: async () => { throw new Error('must not inject'); },
   });
 
-  await assert.rejects(() => adapter.send('s1', 'hello123'), /busy at the desk/);
+  await assert.rejects(() => adapter.send('s1', 'hello123'), /waiting on your answer at the desk/);
+});
+
+test('claude respondQuestion: prefers a desk question over the SDK sessions', async () => {
+  const seen: string[] = [];
+  const deskQuestions = {
+    watch: () => () => {},
+    respond: async (requestId: string) => { seen.push(requestId); return requestId.startsWith('desk:'); },
+  } as unknown as DeskQuestionWatcher;
+
+  const adapter = new ClaudeAdapter('/projects', { deskQuestions });
+  await adapter.respondQuestion('desk:w1:p1:abc123', ['Yes']);
+
+  assert.deepEqual(seen, ['desk:w1:p1:abc123']);
+});
+
+test('claude respondQuestion: falls through when the desk owns no such id', async () => {
+  // The SDK sessions hold their own resolvers, so an unknown id must keep
+  // travelling rather than being swallowed by the desk watcher.
+  const seen: string[] = [];
+  const deskQuestions = {
+    watch: () => () => {},
+    respond: async (requestId: string) => { seen.push(requestId); return false; },
+  } as unknown as DeskQuestionWatcher;
+
+  const adapter = new ClaudeAdapter('/projects', { deskQuestions });
+  await adapter.respondQuestion('sdk-request-1', ['Yes']);
+
+  assert.deepEqual(seen, ['sdk-request-1']);
 });
 
 test('claude send: refuses rather than going headless when alive but unreachable', async () => {
@@ -584,6 +679,24 @@ test('opencode send: injects into the desk pane instead of posting headlessly', 
   assert.deepEqual(posted.sent, [], 'must not also post the prompt headlessly');
 });
 
+test('opencode send: a prompt that was not submitted rejects and ends no turn', async () => {
+  const statuses: string[] = [];
+  const adapter = new OpencodeAdapter(stubClient({ sent: [] }), undefined, {
+    desk: deskWith({ paneId: 'w3:p1', mux: 'herdr', status: 'idle' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('not submitted'); },
+    watchStatus: async () => { throw new Error('the watcher must never start'); },
+  });
+  adapter.setEventSink((event) => {
+    if (event.kind === 'status') statuses.push(event.status);
+  });
+
+  await assert.rejects(() => adapter.send('ses_1', 'hello'), /not submitted/);
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.deepEqual(statuses, []);
+});
+
 test('opencode send: refuses while the desk agent is working', async () => {
   const posted = { sent: [] as Array<[string, string]> };
   const adapter = new OpencodeAdapter(stubClient(posted), undefined, {
@@ -593,6 +706,21 @@ test('opencode send: refuses while the desk agent is working', async () => {
   });
 
   await assert.rejects(() => adapter.send('ses_1', 'hello123'), /busy at the desk/);
+  assert.deepEqual(posted.sent, []);
+});
+
+// opencode has no permission hook — respondPermission still throws
+// AgentUnsupportedError — but a desk dialog never goes through its API at all,
+// so this is the one approval path opencode does get.
+test('opencode send: a blocked desk agent is refused with the reason, not as busy', async () => {
+  const posted = { sent: [] as Array<[string, string]> };
+  const adapter = new OpencodeAdapter(stubClient(posted), undefined, {
+    desk: deskWith({ paneId: 'w3:p1', mux: 'herdr', status: 'blocked' }),
+    liveness: livenessOf(true),
+    inject: async () => { throw new Error('must not inject'); },
+  });
+
+  await assert.rejects(() => adapter.send('ses_1', 'hello123'), /waiting on your answer at the desk/);
   assert.deepEqual(posted.sent, []);
 });
 

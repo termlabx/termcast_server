@@ -93,6 +93,36 @@ export function buildMultiplexerShellArgs(opts: {
 }
 
 /**
+ * Which multiplexer binaries the wrapper gets, given the machine's configured
+ * multiplexer.
+ *
+ * The wrapper dispatches per connection, so it must be able to honour a phone
+ * that explicitly attaches to a tmux/herdr session EVEN when the machine's
+ * default is `none`: the picker lists sessions by what is *installed*, not by
+ * the default, and a wrapper without branches silently drops those attaches
+ * into `/bin/zsh`. So a `none` default still resolves already-installed
+ * binaries (no download) — the one thing `none` deliberately opts out of is
+ * the speculative find-or-install fetch.
+ */
+export async function resolveWrapperMultiplexers(
+  multiplexer: Multiplexer,
+  deps: {
+    findOrInstallTmux: () => Promise<string | null>;
+    findOrInstallHerdr: () => Promise<string | null>;
+    resolveInstalled: (mux: 'tmux' | 'herdr') => string | null;
+  },
+): Promise<{ tmux: string | null; herdr: string | null }> {
+  if (multiplexer === 'none') {
+    return { tmux: deps.resolveInstalled('tmux'), herdr: deps.resolveInstalled('herdr') };
+  }
+  const [tmux, herdr] = await Promise.all([
+    deps.findOrInstallTmux(),
+    deps.findOrInstallHerdr(),
+  ]);
+  return { tmux, herdr };
+}
+
+/**
  * Stable fingerprint of the shell args we would spawn, so start() can tell an
  * orphaned termcastd that was born from the *current* wrapper script from one
  * left over by an older build. A salt-free FNV-1a over the full argv is enough:
@@ -227,15 +257,16 @@ export class TtydManager extends EventEmitter {
 
     // Resolve BOTH multiplexers regardless of which is currently selected: the
     // wrapper script dispatches per connection, so a later switch must not need
-    // a respawn. `none` skips resolution entirely.
-    let tmuxPath: string | null = null;
-    let herdrPath: string | null = null;
-    if (this.multiplexer !== 'none') {
-      tmuxPath = await this.findOrInstallTmux();
-      herdrPath = await this.findOrInstallHerdr();
-      if (!tmuxPath && !herdrPath) {
-        console.log('no multiplexer available — starting a plain shell');
-      }
+    // a respawn. A `none` default still resolves installed binaries so an
+    // explicit phone attach to a listed tmux/herdr session works — but it never
+    // downloads, which is the one thing `none` opts out of.
+    const { tmux: tmuxPath, herdr: herdrPath } = await resolveWrapperMultiplexers(this.multiplexer, {
+      findOrInstallTmux: () => this.findOrInstallTmux(),
+      findOrInstallHerdr: () => this.findOrInstallHerdr(),
+      resolveInstalled: resolveMultiplexerBinary,
+    });
+    if (!tmuxPath && !herdrPath) {
+      console.log('no multiplexer available — starting a plain shell');
     }
 
     const shellArgs = buildMultiplexerShellArgs({

@@ -59,6 +59,15 @@ export interface AgentSessionSummary {
   model: string | null;
   /** True when a permission request is waiting on an answer. */
   needsAttention: boolean;
+  /**
+   * False when the session is running somewhere we cannot type into — an
+   * opencode TUI in tmux, say, which publishes no session→pane signal. Such a
+   * session is readable but cannot take a message; `send` refuses it.
+   *
+   * Optional so a phone that predates the flag simply shows the session and
+   * gets the server's refusal on send — the same outcome, one step later.
+   */
+  reachable?: boolean;
 }
 
 export interface AgentQuestionOption {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMultiplexerShellArgs, stripNestingEnv, wrapperSignature } from './ttyd-manager.js';
+import { buildMultiplexerShellArgs, resolveWrapperMultiplexers, stripNestingEnv, wrapperSignature } from './ttyd-manager.js';
 
 const base = {
   shell: '/bin/zsh',
@@ -99,6 +99,51 @@ test('wrapperSignature: identical argv yields an identical fingerprint', () => {
   const b = buildMultiplexerShellArgs(base);
   assert.equal(wrapperSignature(a), wrapperSignature(b));
   assert.match(wrapperSignature(a), /^[0-9a-f]{8}$/);
+});
+
+test('resolveWrapperMultiplexers: a none default still resolves installed binaries so an explicit attach is honoured', async () => {
+  // The phone picker lists tmux/herdr sessions by what is INSTALLED, not by the
+  // machine's default multiplexer. A `none` default must therefore still hand
+  // those binaries to the wrapper — otherwise TERMINAL_ATTACH for a listed
+  // session falls through to `/bin/zsh` and the terminal opens the wrong thing.
+  const result = await resolveWrapperMultiplexers('none', {
+    findOrInstallTmux: async () => { throw new Error('none must never download tmux'); },
+    findOrInstallHerdr: async () => { throw new Error('none must never download herdr'); },
+    resolveInstalled: (mux) => mux === 'tmux' ? '/usr/bin/tmux' : '/home/u/.local/bin/herdr',
+  });
+
+  assert.deepEqual(result, { tmux: '/usr/bin/tmux', herdr: '/home/u/.local/bin/herdr' });
+});
+
+test('resolveWrapperMultiplexers: a none default with nothing installed yields no branches', async () => {
+  const result = await resolveWrapperMultiplexers('none', {
+    findOrInstallTmux: async () => { throw new Error('must not download under none'); },
+    findOrInstallHerdr: async () => { throw new Error('must not download under none'); },
+    resolveInstalled: () => null,
+  });
+
+  assert.deepEqual(result, { tmux: null, herdr: null });
+  // Nothing installed means the wrapper must degrade to a bare shell, exactly
+  // as it does today for a machine that never had a multiplexer.
+  const args = buildMultiplexerShellArgs({
+    shell: '/bin/zsh',
+    tmuxPath: result.tmux,
+    herdrPath: result.herdr,
+    sidecarPath: '/home/u/.ttyd-server/multiplexer',
+    fallback: 'none',
+  });
+  assert.doesNotMatch(args[2], /herdr:1\)/);
+  assert.doesNotMatch(args[2], /new-session -A -s/);
+});
+
+test('resolveWrapperMultiplexers: an explicit multiplexer goes through find-or-install', async () => {
+  const result = await resolveWrapperMultiplexers('tmux', {
+    findOrInstallTmux: async () => '/usr/bin/tmux',
+    findOrInstallHerdr: async () => '/home/u/.termcast/bin/herdr',
+    resolveInstalled: () => { throw new Error('not used outside none'); },
+  });
+
+  assert.deepEqual(result, { tmux: '/usr/bin/tmux', herdr: '/home/u/.termcast/bin/herdr' });
 });
 
 test('wrapperSignature: any binary change flips the fingerprint (stale-orphan guard)', () => {

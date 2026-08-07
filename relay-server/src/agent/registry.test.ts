@@ -123,6 +123,7 @@ test('list: a reachable session is listed and marked live', async () => {
   const sessions = await registry.list();
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].isLive, true);
+  assert.equal(sessions[0].reachable, true);
 });
 
 test('list: a session nothing holds is listed for headless resume', async () => {
@@ -134,27 +135,75 @@ test('list: a session nothing holds is listed for headless resume', async () => 
   const sessions = await registry.list();
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].isLive, false);
+  assert.equal(sessions[0].reachable, true, 'nothing holds it, so a headless resume can take it');
 });
 
-test('list: a session that is alive but unreachable is hidden', async () => {
+// Previously hidden outright. An opencode TUI in tmux has no desk route at all,
+// so hiding made *every* opencode session in that project vanish from the phone
+// — the reported "can't see the sessions I just created". send() already
+// refuses these with an explanation, so hiding was a second guard that only
+// cost the user the ability to read the session.
+test('list: a session that is alive but unreachable is listed read-only', async () => {
   const registry = new AgentRegistry([adapterListing('claude', [summary('s1', 'claude')])], {
     desk: deskListing([]),
     liveness: livenessFor(['s1']),
   });
 
-  assert.deepEqual(await registry.list(), []);
+  const sessions = await registry.list();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].isLive, true);
+  assert.equal(sessions[0].reachable, false);
 });
 
-test('list: hiding is per session, not per agent', async () => {
+test('list: reachability is per session, not per agent', async () => {
   const registry = new AgentRegistry([
-    adapterListing('claude', [summary('reachable', 'claude'), summary('hidden', 'claude')]),
+    adapterListing('claude', [summary('reachable', 'claude'), summary('stranded', 'claude')]),
   ], {
     desk: deskListing([
       { agent: 'claude', sessionId: 'reachable', target: { paneId: 'w1:p1', mux: 'herdr', status: 'idle' } },
     ]),
-    liveness: livenessFor(['reachable', 'hidden']),
+    liveness: livenessFor(['reachable', 'stranded']),
   });
 
-  const ids = (await registry.list()).map((s) => s.id);
-  assert.deepEqual(ids, ['reachable']);
+  const sessions = await registry.list();
+  assert.deepEqual(sessions.map((s) => [s.id, s.reachable]), [['reachable', true], ['stranded', false]]);
+});
+
+// `blocked` is the desk equivalent of a pending permission: the agent has drawn
+// a dialog and is waiting on a human. needsAttention already means exactly
+// that, so it carries this rather than earning a second flag.
+test('list: a desk agent in blocked needs attention', async () => {
+  const registry = new AgentRegistry([fakeAdapter('claude', [{ id: 's1' }])], {
+    desk: {
+      async lookup() { return null; },
+      async list(): Promise<DeskEntry[]> {
+        return [{
+          agent: 'claude', sessionId: 's1',
+          target: { paneId: 'w3:p2', mux: 'herdr', status: 'blocked' },
+        }];
+      },
+    } as DeskRegistry,
+    liveness: ({ isAlive: async () => false }) as unknown as SessionLiveness,
+  });
+
+  const [listed] = await registry.list();
+  assert.equal(listed.needsAttention, true);
+  assert.equal(listed.reachable, true);
+});
+
+test('list: a desk agent that is merely working does not need attention', async () => {
+  const registry = new AgentRegistry([fakeAdapter('claude', [{ id: 's1' }])], {
+    desk: {
+      async lookup() { return null; },
+      async list(): Promise<DeskEntry[]> {
+        return [{
+          agent: 'claude', sessionId: 's1',
+          target: { paneId: 'w3:p2', mux: 'herdr', status: 'working' },
+        }];
+      },
+    } as DeskRegistry,
+    liveness: ({ isAlive: async () => false }) as unknown as SessionLiveness,
+  });
+
+  assert.equal((await registry.list())[0].needsAttention, false);
 });

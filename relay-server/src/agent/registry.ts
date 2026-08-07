@@ -41,11 +41,17 @@ export class AgentRegistry {
    * An adapter that throws contributes nothing rather than failing the whole
    * list: one broken agent must not hide the other's sessions.
    *
-   * A session is listed when we can deliver a message somewhere the user will
-   * see it — either it is reachable at the desk, or nothing holds it and a
-   * headless resume is honest. A session that is running somewhere we cannot
-   * type into is hidden, because offering it would mean answering on the phone
-   * while the user's own terminal shows nothing.
+   * Every session is listed; `reachable` says whether it can take a message.
+   * It can when it is reachable at the desk, or when nothing holds it and a
+   * headless resume is honest.
+   *
+   * A session running somewhere we cannot type into used to be hidden outright,
+   * on the grounds that offering it would mean answering on the phone while the
+   * user's own terminal showed nothing. But `send` already refuses exactly that
+   * case with an explanation, so hiding was a second guard whose only remaining
+   * effect was to cost the user the ability to *read* the session — and an
+   * opencode TUI in tmux, which has no session→pane signal to route by, made
+   * every opencode session in that project disappear.
    */
   async list(): Promise<AgentSessionSummary[]> {
     const results = await Promise.all(
@@ -62,19 +68,29 @@ export class AgentRegistry {
       .flat()
       .sort((a, b) => (b.lastActiveAt ?? '').localeCompare(a.lastActiveAt ?? ''));
 
-    const reachable = new Set(
-      (await this.desk.list()).map((entry) => `${entry.agent} ${entry.sessionId}`),
+    const entries = await this.desk.list();
+    const reachable = new Set(entries.map((entry) => `${entry.agent} ${entry.sessionId}`));
+    // `blocked` is the desk equivalent of a pending permission: the agent has
+    // drawn a dialog and is waiting on a human. needsAttention already means
+    // exactly that, so it carries this rather than earning a second flag.
+    const blocked = new Set(
+      entries
+        .filter((entry) => entry.target.status === 'blocked')
+        .map((entry) => `${entry.agent} ${entry.sessionId}`),
     );
 
     const visible: AgentSessionSummary[] = [];
     for (const session of sorted) {
-      if (reachable.has(`${session.agent} ${session.id}`)) {
-        visible.push({ ...session, isLive: true });
+      const key = `${session.agent} ${session.id}`;
+      if (reachable.has(key)) {
+        visible.push({
+          ...session, isLive: true, reachable: true,
+          needsAttention: session.needsAttention || blocked.has(key),
+        });
         continue;
       }
-      if (!(await this.liveness.isAlive(session.agent, session.id, session.projectPath))) {
-        visible.push({ ...session, isLive: false });
-      }
+      const alive = await this.liveness.isAlive(session.agent, session.id, session.projectPath);
+      visible.push({ ...session, isLive: alive, reachable: !alive });
     }
     return visible;
   }

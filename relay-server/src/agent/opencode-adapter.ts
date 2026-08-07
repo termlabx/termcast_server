@@ -6,6 +6,7 @@ import { HerdrAgentCli } from './herdr-agent-cli.js';
 import { SessionLiveness } from './session-liveness.js';
 import { defaultDeskRegistry, isInjectable, type DeskRegistry, type DeskTarget } from './desk-target.js';
 import { injectPrompt, waitUntilSettled } from './desk-inject.js';
+import { DeskQuestionWatcher } from './desk-question.js';
 
 /** Thrown by capabilities not yet built, so a caller never mistakes a no-op for success. */
 export class AgentUnsupportedError extends Error {
@@ -32,6 +33,7 @@ export interface OpencodeAdapterDeps {
   cli?: HerdrAgentCli;
   inject?: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
   watchStatus?: (target: DeskTarget) => Promise<void>;
+  deskQuestions?: DeskQuestionWatcher;
 }
 
 export class OpencodeAdapter implements AgentAdapter {
@@ -41,6 +43,7 @@ export class OpencodeAdapter implements AgentAdapter {
   private readonly liveness: SessionLiveness;
   private readonly inject: (paneId: string, text: string, mux: 'herdr' | 'tmux') => Promise<void>;
   private readonly watchStatus: (target: DeskTarget) => Promise<void>;
+  private readonly deskQuestions: DeskQuestionWatcher;
   private eventSink: ((event: AgentEvent) => void) | null = null;
 
   constructor(
@@ -53,6 +56,7 @@ export class OpencodeAdapter implements AgentAdapter {
     this.liveness = deps.liveness ?? new SessionLiveness();
     this.inject = deps.inject ?? ((paneId, text, mux) => injectPrompt(cli, paneId, text, mux));
     this.watchStatus = deps.watchStatus ?? ((target) => waitUntilSettled(cli, target));
+    this.deskQuestions = deps.deskQuestions ?? new DeskQuestionWatcher(cli, this.desk);
   }
 
   /** Where desk-send turn ends go; the transcript tail cannot announce them. */
@@ -94,6 +98,9 @@ export class OpencodeAdapter implements AgentAdapter {
    * content change is what makes the reply arrive, and it is unchanged here.
    */
   async subscribe(sessionId: string, sinceSeq: number, onEvent: (event: AgentEvent) => void): Promise<Unsubscribe> {
+    // The HTTP transcript never carries a dialog the TUI drew in its own pane,
+    // so this is the only way one reaches the phone.
+    const stopQuestions = this.deskQuestions.watch('opencode', sessionId, onEvent);
     let stopped = false;
     /** message id → fingerprint of what we last sent for it. */
     const sent = new Map<string, string>();
@@ -191,6 +198,19 @@ export class OpencodeAdapter implements AgentAdapter {
       scheduleFetch();
     };
 
+    // Whether this session's turns run somewhere our event stream cannot see.
+    //
+    // A desk-hosted session is driven by the TUI's own opencode process, which
+    // has a separate event bus: `/api/event` on our server stays healthy and
+    // silent for it, so "the socket is up" is the wrong question to gate the
+    // fast poll on. Resolved once and closed over rather than asked every
+    // second — a session does not change home mid-conversation, and a `herdr
+    // agent list` per second per attached phone is a cost with no payer.
+    let deskRouted = false;
+    void this.desk.lookup('opencode', sessionId)
+      .then((target) => { deskRouted = target !== null; })
+      .catch(() => { /* Unknown reachability behaves as before: trust the stream. */ });
+
     const streamUnsubscribe = this.eventStream?.subscribe(sessionId, onOpencodeEvent);
     const connectionUnsubscribe = this.eventStream?.onConnectionChange((connected) => {
       if (stopped || !connected) return;
@@ -200,11 +220,13 @@ export class OpencodeAdapter implements AgentAdapter {
       void transcript();
     });
 
-    // Fallback poll: only while the stream is unavailable. With no stream at
-    // all (an opencode without /api/event), `isConnected()` is undefined and
-    // this degrades to exactly the old 1 s poll.
+    // Fallback poll: whenever this session has no live event source — either
+    // the stream is unavailable, or the session is driven at the desk and the
+    // stream was never going to carry it. With no stream at all (an opencode
+    // without /api/event), `isConnected()` is undefined and this degrades to
+    // exactly the old 1 s poll.
     intervals.push(setInterval(() => {
-      if (!this.eventStream?.isConnected()) void transcript();
+      if (deskRouted || !this.eventStream?.isConnected()) void transcript();
     }, POLL_MS));
 
     // Safety poll: only while the stream is healthy, catching a stream that
@@ -222,6 +244,7 @@ export class OpencodeAdapter implements AgentAdapter {
       if (deltaTimer) clearTimeout(deltaTimer);
       streamUnsubscribe?.();
       connectionUnsubscribe?.();
+      stopQuestions();
     };
   }
 
@@ -237,8 +260,17 @@ export class OpencodeAdapter implements AgentAdapter {
   async send(sessionId: string, text: string): Promise<void> {
     const target = await this.desk.lookup('opencode', sessionId);
     if (target) {
+      // working and blocked are opposites from the user's point of view —
+      // working means wait, blocked means you are the thing it is waiting for.
+      // This is the one approval path opencode gets: it has no permission hook,
+      // but a desk dialog never goes through its API at all.
+      if (target.status === 'blocked') {
+        throw new Error(
+          'That session is waiting on your answer at the desk — answer the prompt shown here, then send again.',
+        );
+      }
       if (!isInjectable(target.status)) {
-        throw new Error('That session is busy at the desk — it is still working or waiting on you.');
+        throw new Error('That session is busy at the desk — it is still working.');
       }
       await this.inject(target.paneId, text, target.mux);
       void this.watchUntilSettled(sessionId, target);
@@ -275,6 +307,9 @@ export class OpencodeAdapter implements AgentAdapter {
   }
 
   async respondQuestion(requestId: string, answers?: string[], rejected?: boolean): Promise<void> {
+    // A desk dialog is answered with keystrokes, not over HTTP; only ids the
+    // watcher does not own belong to opencode's own question tool.
+    if (await this.deskQuestions.respond(requestId, answers, rejected)) return;
     if (rejected) {
       await this.client.rejectQuestion(requestId);
     } else {

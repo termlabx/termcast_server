@@ -66,9 +66,11 @@ export class DeskQuestionWatcher {
         // herdr down, or a pane that vanished. The next tick retries; a failing
         // poll must never tear down the transcript stream it rides alongside.
       }
-      if (!stopped) timer = setTimeout(tick, this.pollMs);
+      if (!stopped) timer = setTimeout(tick, this.pollMs).unref();
     };
-    timer = setTimeout(tick, 0);
+    // unref: a poller that only mirrors somebody else's dialog has no business
+    // keeping the daemon alive on its own.
+    timer = setTimeout(tick, 0).unref();
 
     return () => {
       stopped = true;

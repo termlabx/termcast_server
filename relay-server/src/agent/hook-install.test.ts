@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { installHooks, removeHooks, hooksInstalled, HOOK_MARKER } from './hook-install.js';
 
 function settingsFile(contents: unknown): string {
@@ -92,4 +93,17 @@ test('installHooks: a corrupt settings file is not destroyed', () => {
 
   assert.throws(() => installHooks(path, { hookDir: '/opt/termcast/hooks' }));
   assert.equal(readFileSync(path, 'utf8'), '{ this is not json');
+});
+
+test('the hook scripts are present where stageHookScripts looks for them', () => {
+  // Deliberately resolved with the same expression as stageHookScripts, so the
+  // two cannot drift: under `tsx` this is src/assets, in a build it is
+  // dist/assets. A build that copies only *.js passes every other test in this
+  // file and still ships a daemon whose ensureHooks() throws ENOENT on every
+  // start — which is exactly how it reached 0.171.0.
+  const assets = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets');
+
+  for (const asset of ['agent-permission-hook.sh', 'agent-session-hook.sh']) {
+    assert.ok(existsSync(join(assets, asset)), `${asset} missing from ${assets}`);
+  }
 });

@@ -15,17 +15,39 @@ const SETTLE_GRACE_MS = 2_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Type `text` into a pane and submit it. Throws when the multiplexer refuses. */
+/**
+ * Type `text` into a pane and submit it. Throws when the multiplexer refuses,
+ * and — under herdr — when the text went in but no turn ever started.
+ *
+ * That second case is not hypothetical: herdr answers `agent_prompted` for a
+ * prompt it typed into the pane and failed to submit, so two phone sends two
+ * minutes apart were once found concatenated in a single unsubmitted input box
+ * ("he'llhello"). Treating acceptance as delivery is what let the caller report
+ * a completed turn for a message that never ran.
+ *
+ * `exec` is a test seam; production runs the real shell.
+ */
 export async function injectPrompt(
   cli: HerdrAgentCli, paneId: string, text: string, mux: 'herdr' | 'tmux',
+  exec: (command: string) => Promise<unknown> = run,
 ): Promise<void> {
   if (mux === 'herdr') {
-    await cli.prompt(paneId, text);
+    try {
+      await cli.prompt(paneId, text, { confirmStart: true });
+    } catch (err) {
+      // herdr's own codes (agent_prompt_stalled, timeout) reach the phone
+      // verbatim as the whole explanation, so they are translated here.
+      throw new Error(
+        'The message reached the session at your desk but was not submitted — ' +
+        'no turn started. It may still be sitting in the input box there.',
+        { cause: err },
+      );
+    }
     return;
   }
   const command = sendKeysCommand(paneId, text, 'tmux');
   if (!command) throw new Error('nothing to send');
-  await run(command);
+  await exec(command);
 }
 
 /**
