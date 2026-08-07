@@ -1,7 +1,77 @@
 import type { AgentEvent, PermissionBehavior } from './adapter.js';
 import type { AgentQuestionInfo, MessageBlock } from './types.js';
+import { parseAskUserQuestion } from './ask-user-question.js';
 
 const MAX_BLOCK_CHARS = 2048;
+
+/**
+ * How long a question may hold the agent.
+ *
+ * Matches PermissionBroker, which solved the same problem for tool approvals: a
+ * `canUseTool` promise nobody settles blocks the turn forever, and an agent
+ * wedged behind a card the user never saw is indistinguishable from a hung one.
+ */
+export const QUESTION_TIMEOUT_MS = 540_000;
+
+/**
+ * One AskUserQuestion call fans out into one card per member question.
+ *
+ * The call carries up to four questions, each with its own options and its own
+ * multiSelect. Collapsing them into a single card — which is what the previous
+ * reader's shape implied — loses every question after the first.
+ */
+export function buildQuestionEvents(
+  input: unknown,
+  ctx: { sessionId: string; requestId: string },
+): AgentQuestionInfo[] {
+  const parsed = parseAskUserQuestion(input);
+  const groupId = ctx.requestId;
+  const createdAt = new Date().toISOString();
+
+  return parsed.map((question, index) => ({
+    // Distinct per member: a shared id would let one answer resolve them all.
+    requestId: `${groupId}#${index}`,
+    sessionId: ctx.sessionId,
+    agent: 'claude' as const,
+    prompt: question.prompt,
+    header: question.header,
+    kind: question.options.length > 0 ? ('select' as const) : ('freeform' as const),
+    options: question.options.map((option) => ({
+      label: option.label,
+      description: option.description,
+    })),
+    // Absent rather than false: the phone reads absent as "not multi-select",
+    // and spelling out false on every question bloats every frame for no gain.
+    multiSelect: question.multiSelect ? true : undefined,
+    // AskUserQuestion always accepts an answer that is not on the list.
+    allowsOther: true,
+    groupId,
+    groupIndex: index,
+    groupCount: parsed.length,
+    createdAt,
+    origin: 'agent' as const,
+  }));
+}
+
+/**
+ * The result shape the tool expects: each question echoed back with the labels
+ * chosen for it.
+ *
+ * The previous code returned `{...input, answer: 'a, b'}`, which the tool does
+ * not read — so a correct tap on the phone still produced a wrong answer.
+ */
+export function askUserQuestionResult(
+  input: unknown,
+  chosen: string[][],
+): { answers: { header?: string; question: string; selected: string[] }[] } {
+  return {
+    answers: parseAskUserQuestion(input).map((question, index) => ({
+      header: question.header,
+      question: question.prompt,
+      selected: chosen[index] ?? [],
+    })),
+  };
+}
 
 function clamp(text: string): { text: string; truncated: boolean } {
   return text.length > MAX_BLOCK_CHARS
@@ -150,37 +220,65 @@ export class ClaudeSdkSession {
           const requestId = `${this.sessionId}:${this.nextSeq()}`;
 
           if (toolName === 'AskUserQuestion') {
-            const prompt = typeof input.question === 'string' ? input.question :
-              typeof input.prompt === 'string' ? input.prompt :
-              summarise(toolName, input);
-            const rawOptions = Array.isArray(input.options) ? input.options :
-              Array.isArray(input.suggestions) ? input.suggestions : [];
-            const options = rawOptions.map((o: unknown) => {
-              const opt = o as Record<string, unknown>;
-              return {
-                label: typeof opt.label === 'string' ? opt.label : String(opt),
-                description: typeof opt.description === 'string' ? opt.description : undefined,
-              };
-            });
-            const kind = options.length > 0 ? 'select' : 'freeform';
-            const info: AgentQuestionInfo = {
-              requestId,
-              sessionId: this.sessionId,
-              agent: 'claude',
-              prompt,
-              kind,
-              options,
-              createdAt: new Date().toISOString(),
-            };
-            this.emit({ kind: 'question', sessionId: this.sessionId, seq: this.nextSeq(), request: info });
+            const infos = buildQuestionEvents(input, { sessionId: this.sessionId, requestId });
+            if (infos.length === 0) {
+              // Nothing answerable in the call. Let it through untouched rather
+              // than holding the turn behind a card that would render empty.
+              return { behavior: 'allow' as const, updatedInput: input };
+            }
 
-            const answers = await new Promise<string[] | undefined>((resolve) => {
-              this.pendingQuestions.set(requestId, (a, r) => resolve(r ? undefined : a));
+            const chosen: string[][] = infos.map(() => []);
+            let outstanding = infos.length;
+            let rejectedAll = false;
+
+            const settled = new Promise<void>((resolve) => {
+              for (const [index, info] of infos.entries()) {
+                this.pendingQuestions.set(info.requestId, (answers, rejected) => {
+                  // Rejecting one member cancels the whole call: the tool has no
+                  // notion of a partially declined question.
+                  if (rejected) { rejectedAll = true; resolve(); return; }
+                  chosen[index] = answers ?? [];
+                  outstanding -= 1;
+                  if (outstanding === 0) resolve();
+                });
+                this.emit({
+                  kind: 'question', sessionId: this.sessionId, seq: this.nextSeq(), request: info,
+                });
+              }
             });
-            if (answers === undefined) {
+
+            let timer: NodeJS.Timeout | undefined;
+            const timedOut = await Promise.race([
+              settled.then(() => false),
+              new Promise<boolean>((resolve) => {
+                // unref: a question nobody is going to answer must not be the
+                // reason the daemon stays alive.
+                timer = setTimeout(() => resolve(true), QUESTION_TIMEOUT_MS);
+                timer.unref();
+              }),
+            ]);
+            clearTimeout(timer);
+
+            for (const info of infos) {
+              this.pendingQuestions.delete(info.requestId);
+              this.emit({
+                kind: 'questionResolved',
+                sessionId: this.sessionId,
+                seq: this.nextSeq(),
+                requestId: info.requestId,
+                outcome: timedOut ? 'expired' : rejectedAll ? 'rejected' : 'answered',
+                answers: timedOut || rejectedAll ? undefined : chosen[info.groupIndex ?? 0],
+                detail: timedOut ? 'Nobody answered in time, so the agent moved on.' : undefined,
+              });
+            }
+
+            if (timedOut || rejectedAll) {
               return { behavior: 'deny' as const, message: 'Question rejected from phone' };
             }
-            return { behavior: 'allow' as const, updatedInput: { ...input, answer: answers.join(', ') } };
+            return {
+              behavior: 'allow' as const,
+              updatedInput: askUserQuestionResult(input, chosen) as unknown as Record<string, unknown>,
+            };
           }
 
           const clamped = clamp(JSON.stringify(input ?? {}));
