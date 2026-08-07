@@ -161,3 +161,30 @@ test('only the dialog below the last rule is read', () => {
   assert.match(dialog.prompt, /Run the tests\?/);
   assert.deepEqual(dialog.options.map((o) => o.label), ['Sure', 'Skip']);
 });
+
+const WINDOWED_DIALOG = [
+  '─'.repeat(60),
+  '  Select Model',
+  '',
+  '  ❯ Default (recommended)',
+  '    Opus',
+  '    Sonnet',
+  '  ↓ 3 more',
+  '',
+  '  Enter to select · Esc to cancel · ↑/↓ to navigate',
+].join('\n');
+
+test('marks a list the TUI has scrolled as windowed', () => {
+  const dialog = parseDeskDialog(WINDOWED_DIALOG);
+  assert.ok(dialog);
+  assert.equal(dialog.windowed, true);
+  // The scroll hint is chrome, never an option.
+  assert.deepEqual(dialog.options.map((o) => o.label),
+    ['Default (recommended)', 'Opus', 'Sonnet']);
+});
+
+test('an ordinary list is not windowed', () => {
+  const dialog = parseDeskDialog(ARROW_DIALOG);
+  assert.ok(dialog);
+  assert.equal(dialog.windowed, false);
+});

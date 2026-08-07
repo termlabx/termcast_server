@@ -198,7 +198,17 @@ export class DeskQuestionWatcher {
  * has to be walked from wherever the cursor currently sits.
  */
 export function answerKeys(
-  dialog: DeskDialog, answers: string[] | undefined, rejected: boolean | undefined,
+  dialog: DeskDialog,
+  answers: string[] | undefined,
+  rejected: boolean | undefined,
+  /**
+   * Absolute position of the highlighted row, supplied by correlation.
+   *
+   * The dialog's own `selected` index counts within the visible window, so on a
+   * scrolled list it is short by the window offset and walking from it lands on
+   * the wrong option.
+   */
+  cursorOverride?: number,
 ): string[] | null {
   if (rejected) return ['esc'];
 
@@ -214,9 +224,18 @@ export function answerKeys(
 
   const chosen = dialog.options.find((option) => option.label === answer);
   if (!chosen) return null;
-  if (dialog.input === 'numbered') return [String(chosen.index)];
 
-  const cursor = dialog.options.find((option) => option.selected)?.index ?? 1;
+  // A digit key selects only 1..9. Sending "1" "0" for option 10 selects
+  // option 1 and looks like it worked, so anything past 9 walks instead.
+  if (dialog.input === 'numbered' && chosen.index <= 9 && cursorOverride === undefined) {
+    return [String(chosen.index)];
+  }
+
+  const cursor = cursorOverride ?? dialog.options.find((option) => option.selected)?.index;
+  // No cursor row and no override means there is no confirmed position to walk
+  // from, and guessing one picks an arbitrary option.
+  if (cursor === undefined) return null;
+
   const delta = chosen.index - cursor;
   return [...Array<string>(Math.abs(delta)).fill(delta >= 0 ? 'down' : 'up'), 'enter'];
 }

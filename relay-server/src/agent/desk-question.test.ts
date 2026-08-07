@@ -277,3 +277,43 @@ test('answerKeys types a freeform answer and submits it', () => {
   assert.equal(dialog.kind, 'freeform');
   assert.deepEqual(answerKeys(dialog, ['use tabs'], false), ['use tabs', 'enter']);
 });
+
+// --- long and scrolled lists ----------------------------------------------
+
+const TWELVE = [
+  '─'.repeat(60),
+  '  Pick one',
+  ...Array.from({ length: 12 }, (_, i) => `  ${i === 0 ? '❯' : ' '} ${i + 1}. Option ${i + 1}`),
+  '  Enter to confirm · Esc to cancel',
+].join('\n');
+
+test('answerKeys: options 1-9 of a long numbered list key by digit', () => {
+  const dialog = parseDeskDialog(TWELVE);
+  assert.ok(dialog);
+  assert.deepEqual(answerKeys(dialog, ['Option 7'], false), ['7']);
+});
+
+// Sending "1" then "0" selects option 1 — the worst available failure, because
+// it looks like it worked.
+test('answerKeys: option 10+ keys by arrow walk rather than by two digits', () => {
+  const dialog = parseDeskDialog(TWELVE);
+  assert.ok(dialog);
+  assert.deepEqual(answerKeys(dialog, ['Option 11'], false),
+    [...Array<string>(10).fill('down'), 'enter']);
+});
+
+test('answerKeys: option 10+ is refused when there is no cursor to walk from', () => {
+  const dialog = parseDeskDialog(TWELVE.replace('❯', ' '));
+  assert.ok(dialog);
+  assert.equal(answerKeys(dialog, ['Option 11'], false), null);
+  // A digit still works without a cursor, so 1..9 must stay answerable.
+  assert.deepEqual(answerKeys(dialog, ['Option 3'], false), ['3']);
+});
+
+test('answerKeys: an explicit cursor override wins over the pane row', () => {
+  const dialog = parseDeskDialog(TWELVE);
+  assert.ok(dialog);
+  // Correlation supplies the absolute position on a windowed list, where the
+  // pane's own index counts only within the visible window.
+  assert.deepEqual(answerKeys(dialog, ['Option 11'], false, 10), ['down', 'enter']);
+});

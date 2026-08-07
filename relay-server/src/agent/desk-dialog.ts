@@ -41,6 +41,14 @@ export interface DeskDialog {
    * look to the race guard like a different dialog.
    */
   fingerprint: string;
+  /**
+   * True when the pane shows only part of the list.
+   *
+   * A row index read off the screen is then a position *within the window*, not
+   * within the list, so index-based keying is invalid and correlation has to
+   * recover the offset before it can be trusted.
+   */
+  windowed: boolean;
 }
 
 /**
@@ -63,6 +71,14 @@ const ANSI = /\x1b\][\s\S]*?(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\
 const RULE = /^[─━═]{8,}$/;
 const NUMBERED = /^\s*(?:❯|>)?\s*(\d+)[.)]\s+(\S.*)$/;
 const BULLET = /^\s*(?:❯|>)\s+(\S.*)$/;
+
+/**
+ * The row a TUI draws when its list outruns the space it has ("↓ 3 more").
+ *
+ * Its presence is the only on-screen evidence that the visible rows are a
+ * window rather than the whole list.
+ */
+const SCROLL_HINT = /^\s*[↑↓]\s*\d+\s+more\b/;
 
 export function parseDeskDialog(rendered: string): DeskDialog | null {
   const lines = rendered.split('\n').map(cleanLine);
@@ -94,20 +110,26 @@ export function parseDeskDialog(rendered: string): DeskDialog | null {
     .digest('hex')
     .slice(0, 16);
 
-  const numbered = readNumbered(region);
-  const options = numbered ?? readArrows(region);
+  const windowed = region.some((line) => SCROLL_HINT.test(line));
+  // Dropped before options are read: the hint sits in the option column and
+  // would otherwise be offered as a choice that selects nothing.
+  const rows = region.filter((line) => !SCROLL_HINT.test(line));
+
+  const numbered = readNumbered(rows);
+  const options = numbered ?? readArrows(rows);
   if (!options) {
-    return { prompt: joinText(region), kind: 'freeform', input: 'text', options: [], fingerprint };
+    return { prompt: joinText(rows), kind: 'freeform', input: 'text', options: [], fingerprint, windowed };
   }
 
   const matcher = numbered ? NUMBERED : BULLET;
-  const firstOption = region.findIndex((line) => matcher.test(line));
+  const firstOption = rows.findIndex((line) => matcher.test(line));
   return {
-    prompt: joinText(region.slice(0, firstOption)) || joinText(region),
+    prompt: joinText(rows.slice(0, firstOption)) || joinText(rows),
     kind: 'select',
     input: numbered ? 'numbered' : 'arrows',
     options,
     fingerprint,
+    windowed,
   };
 }
 
@@ -129,8 +151,9 @@ function readNumbered(region: string[]): DeskDialogOption[] | null {
   }
   if (rows.length < 2) return null;
   if (rows.some((row, i) => row.index !== i + 1)) return null;
-  // Nothing highlighted means the cursor sits on the first row.
-  if (!rows.some((row) => row.selected)) rows[0].selected = true;
+  // Deliberately no "nothing highlighted means row 1" fallback. A digit selects
+  // 1..9 without needing a cursor at all, and inventing one would let an option
+  // past 9 be answered by walking from a position the TUI never confirmed.
   return rows;
 }
 
