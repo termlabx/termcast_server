@@ -485,6 +485,12 @@ export class Bridge extends EventEmitter {
         const r = ev.request as Record<string, unknown>;
         fields.requestId = r.requestId;
         if (typeof r.prompt === 'string') fields.prompt = r.prompt;
+      } else if (ev.kind === 'questionResolved') {
+        // The outcome is the whole point of the line: "the card went away" is
+        // not debuggable, "it went away because the desk answered it" is.
+        fields.requestId = ev.requestId;
+        fields.value = ev.outcome;
+        if (typeof ev.detail === 'string') fields.detail = ev.detail;
       } else if (opcode === AGENT_SESSIONS) {
         fields.count = Array.isArray(ev.sessions) ? ev.sessions.length : 0;
       }

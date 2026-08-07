@@ -17,6 +17,26 @@ export interface AgentPermissionRequest {
 
 export type PermissionBehavior = 'allow' | 'deny';
 
+/**
+ * Why a question stopped being answerable.
+ *
+ * `answered`/`rejected` are the phone's own doing. The rest are the reasons a
+ * card must go stale *in place* rather than vanish: silently removing a card
+ * somebody was mid-decision on is what sends them to the laptop to find out
+ * what happened, which is the thing this app exists to avoid.
+ */
+export type AgentQuestionOutcome =
+  | 'answered'
+  | 'rejected'
+  /** Someone answered at the keyboard, or another phone got there first. */
+  | 'answered_elsewhere'
+  /** The dialog was replaced by a different one before the answer landed. */
+  | 'superseded'
+  /** Nobody answered within the deadline; the agent was released. */
+  | 'expired'
+  /** The session or the daemon went away while it was pending. */
+  | 'unavailable';
+
 export type AgentEvent =
   | { kind: 'message'; sessionId: string; seq: number; message: AgentMessage }
   // `replace` marks a delta that carries the whole current text rather than an
@@ -26,6 +46,9 @@ export type AgentEvent =
   | { kind: 'status'; sessionId: string; seq: number; status: 'turn_start' | 'turn_end' | 'ended' | 'error'; detail?: string }
   | { kind: 'permission'; sessionId: string; seq: number; request: AgentPermissionRequest }
   | { kind: 'question'; sessionId: string; seq: number; request: AgentQuestionInfo }
+  // A phone that predates this kind ignores it: applyEvent switches on `kind`
+  // with a default, so an unknown one is dropped rather than failing the frame.
+  | { kind: 'questionResolved'; sessionId: string; seq: number; requestId: string; outcome: AgentQuestionOutcome; answers?: string[]; detail?: string }
   | { kind: 'history'; sessionId: string; beforeSeq: number | null; hasMore: boolean; messages: AgentMessage[] };
 
 export interface HistoryPage {
