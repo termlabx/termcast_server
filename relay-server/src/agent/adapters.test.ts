@@ -4,7 +4,10 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeAdapter } from './claude-adapter.js';
-import { OpencodeAdapter, AgentUnsupportedError } from './opencode-adapter.js';
+import {
+  OpencodeAdapter, AgentUnsupportedError,
+  answersFromQuestionOutput, questionResolutionFor,
+} from './opencode-adapter.js';
 import { OpencodeClient } from './opencode-client.js';
 import type { OpencodeEvent, OpencodeEventStream } from './opencode-event-stream.js';
 import type { AgentEvent } from './adapter.js';
@@ -747,4 +750,115 @@ test('opencode send: posts headlessly when nothing holds the session', async () 
   await adapter.send('ses_1', 'hello123');
 
   assert.deepEqual(posted.sent, [['ses_1', 'hello123']]);
+});
+
+// --- already-answered questions -------------------------------------------
+
+/**
+ * Captured from a real opencode `question` tool result:
+ *
+ *   "User has answered your questions: \"<question>\"=\"Entire project\". You
+ *    can now continue with the user's answers in mind."
+ */
+const ANSWERED_OUTPUT =
+  'User has answered your questions: "Which code would you like me to explain?"='
+  + '"Entire project". You can now continue with the user\'s answers in mind.';
+
+test('answersFromQuestionOutput: recovers the chosen label', () => {
+  assert.deepEqual(
+    answersFromQuestionOutput(ANSWERED_OUTPUT, ['Entire project', 'Specific file/dir']),
+    ['Entire project'],
+  );
+});
+
+test('answersFromQuestionOutput: recovers several labels for a multi-select', () => {
+  const output = 'User has answered your questions: "Which features?"="Auth", "Billing". Continue.';
+  assert.deepEqual(answersFromQuestionOutput(output, ['Auth', 'Billing', 'Metrics']),
+    ['Auth', 'Billing']);
+});
+
+// The question text is itself quoted in the output, so matching bare quoted
+// strings would pick it up. Only exact option labels count.
+test('answersFromQuestionOutput: never mistakes the question text for an answer', () => {
+  const output = 'User has answered your questions: "Postgres or SQLite?"="SQLite". Continue.';
+  assert.deepEqual(answersFromQuestionOutput(output, ['Postgres', 'SQLite']), ['SQLite']);
+});
+
+test('answersFromQuestionOutput: returns nothing when no label matches', () => {
+  assert.deepEqual(answersFromQuestionOutput('User answered.', ['A', 'B']), []);
+});
+
+test('questionResolutionFor: a tool with no result is still live', () => {
+  assert.equal(questionResolutionFor(undefined, ['A']), null);
+});
+
+test('questionResolutionFor: a completed tool resolves as answered', () => {
+  const resolution = questionResolutionFor(ANSWERED_OUTPUT, ['Entire project']);
+  assert.ok(resolution);
+  assert.equal(resolution.outcome, 'answered');
+  assert.deepEqual(resolution.answers, ['Entire project']);
+});
+
+/** A question tool-use plus its completed result, i.e. one already answered. */
+const answeredQuestion = (id: string, input: string, output: string): AgentMessage => ({
+  id: `q-${id}`, seq: 1, role: 'assistant', timestamp: null,
+  blocks: [
+    { kind: 'toolUse', toolUseId: id, name: 'question', summary: '', input, truncated: false },
+    { kind: 'toolResult', toolUseId: id, ok: true, preview: output, truncated: false },
+  ],
+});
+
+const ANSWERED_INPUT = JSON.stringify({
+  questions: [{
+    question: 'Which code would you like me to explain?',
+    header: 'Which code?',
+    options: [
+      { label: 'Entire project', description: 'All code' },
+      { label: 'Specific file/dir', description: 'One path' },
+    ],
+  }],
+});
+
+test('OpencodeAdapter.subscribe: an already-answered question arrives resolved, not live', async () => {
+  // Attaching walks the whole transcript, so every question the session ever
+  // asked used to arrive as a live card demanding an answer again.
+  const client = transcriptStub([{
+    messages: [answeredQuestion('q_1', ANSWERED_INPUT, ANSWERED_OUTPUT)],
+    running: false,
+  }]);
+
+  const events: AgentEvent[] = [];
+  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (e) => events.push(e));
+  await new Promise((r) => setTimeout(r, 1200));
+  stop();
+
+  const asked = events.filter((e) => e.kind === 'question');
+  const resolved = events.filter((e) => e.kind === 'questionResolved');
+  assert.equal(asked.length, 1, 'the card is still shown, so the answer stays in the transcript');
+  assert.equal(resolved.length, 1, 'and it arrives already resolved');
+  assert.equal(resolved[0].kind === 'questionResolved' && resolved[0].outcome, 'answered');
+  assert.deepEqual(
+    resolved[0].kind === 'questionResolved' ? resolved[0].answers : null,
+    ['Entire project'],
+  );
+});
+
+test('OpencodeAdapter.subscribe: an unanswered question stays live', async () => {
+  // listQuestions must be present: the unanswered path consults the live API
+  // first, and transcriptStub alone does not define it.
+  const client = {
+    listTranscript: async () => ({ messages: [questionToolUse('q_2', ANSWERED_INPUT)], running: false }),
+    listQuestions: async () => [],
+  } as unknown as OpencodeClient;
+
+  const events: AgentEvent[] = [];
+  const stop = await new OpencodeAdapter(client).subscribe('ses_abc', -1, (e) => events.push(e));
+  // Long enough for the live-API retry window (3 x 500ms) the unanswered path
+  // still goes through. The answered path skips it entirely, which is why that
+  // test needs no such wait.
+  await new Promise((r) => setTimeout(r, 3000));
+  stop();
+
+  assert.equal(events.filter((e) => e.kind === 'question').length, 1);
+  assert.equal(events.filter((e) => e.kind === 'questionResolved').length, 0);
 });

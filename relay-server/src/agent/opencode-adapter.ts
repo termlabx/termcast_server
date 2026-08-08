@@ -400,6 +400,16 @@ async function detectQuestions(
   sessionId: string,
   onEvent: (event: AgentEvent) => void,
 ): Promise<void> {
+  // Answered questions are the common case on attach: the transcript carries
+  // every question the session ever asked, and without this each one arrived as
+  // a live card asking to be answered again.
+  const outputs = new Map<string, string>();
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      if (block.kind === 'toolResult') outputs.set(block.toolUseId, block.preview);
+    }
+  }
+
   for (const message of messages) {
     if (message.role !== 'assistant') continue;
     for (const block of message.blocks) {
@@ -407,6 +417,26 @@ async function detectQuestions(
       const toolUseId = block.toolUseId;
       if (!toolUseId || seen.has(toolUseId)) continue;
       seen.add(toolUseId);
+
+      // An answered question is rendered from the transcript alone. Asking the
+      // live API for it would be pointless — it only lists pending ones — and
+      // the retry loop below would burn its whole window on every history entry.
+      const answered = outputs.get(toolUseId);
+      if (answered !== undefined) {
+        const request = parseQuestionToolUse(block, sessionId);
+        if (!request) continue;
+        onEvent({ kind: 'question', sessionId, seq: message.seq, request });
+        const resolution = questionResolutionFor(answered, request.options.map((o) => o.label));
+        if (resolution) {
+          onEvent({
+            kind: 'questionResolved', sessionId, seq: message.seq,
+            requestId: request.requestId,
+            outcome: resolution.outcome,
+            answers: resolution.answers,
+          });
+        }
+        continue;
+      }
 
       // The question API is authoritative; the block is a fallback. When neither
       // resolves, retry the API for a bounded window — a block can appear in the
@@ -432,4 +462,40 @@ async function detectQuestions(
       });
     }
   }
+}
+/**
+ * The option labels chosen in a completed `question` tool result.
+ *
+ * opencode phrases the result as
+ * `User has answered your questions: "<question>"="Entire project". …`
+ * so the answer is a quoted string — but so is the question itself. Only exact
+ * matches against this question's own options count, which is what stops the
+ * question text being read back as an answer.
+ */
+export function answersFromQuestionOutput(output: string, optionLabels: string[]): string[] {
+  const labels = new Set(optionLabels);
+  const chosen: string[] = [];
+  for (const match of output.matchAll(/"([^"]*)"/g)) {
+    const label = match[1];
+    if (labels.has(label) && !chosen.includes(label)) chosen.push(label);
+  }
+  return chosen;
+}
+
+/**
+ * Whether a question in the transcript has already been answered, and with what.
+ *
+ * `output` is the matching tool result's preview, or undefined when the tool has
+ * none. opencode leaves `output` null while a question is still on screen and
+ * fills it on completion, so its presence *is* the answered signal.
+ *
+ * Without this, attaching replayed every question the session had ever asked as
+ * a live card — the whole history arriving as things to answer again.
+ */
+export function questionResolutionFor(
+  output: string | undefined,
+  optionLabels: string[],
+): { outcome: 'answered'; answers: string[] } | null {
+  if (output === undefined) return null;
+  return { outcome: 'answered', answers: answersFromQuestionOutput(output, optionLabels) };
 }
