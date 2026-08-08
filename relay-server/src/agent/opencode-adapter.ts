@@ -349,11 +349,22 @@ function parseQuestionToolUse(
   const toolUseId = block.toolUseId;
   if (!toolUseId) return null;
 
-  let prompt: string;
+  let prompt = block.summary;
   let options: { label: string; description: string | undefined }[] = [];
+  let multiple = false;
+  let custom = false;
+
   try {
     const input = JSON.parse(block.input) as Record<string, unknown>;
-    const rawOptions = Array.isArray(input.options) ? input.options : [];
+    // The tool carries `questions: [{ question, header, options, multiple,
+    // custom }]`, the same shape the question API returns. Only the first
+    // member is rendered here: this is a stopgap for a transcript that raced
+    // the API, and the API — which fans the whole group out — wins the moment
+    // it answers.
+    const members = Array.isArray(input.questions) ? input.questions : [];
+    const first = (members[0] ?? input) as Record<string, unknown>;
+
+    const rawOptions = Array.isArray(first.options) ? first.options : [];
     options = rawOptions.map((o: unknown) => {
       const opt = o as Record<string, unknown>;
       return {
@@ -361,20 +372,23 @@ function parseQuestionToolUse(
         description: typeof opt.description === 'string' ? opt.description : undefined,
       };
     });
-    prompt = typeof input.prompt === 'string' ? input.prompt : block.summary;
+    // `prompt` is the pre-`questions` spelling; both are read so a build on
+    // either side of that change still renders something.
+    prompt = typeof first.question === 'string' ? first.question
+      : typeof first.prompt === 'string' ? first.prompt
+      : block.summary;
+    multiple = first.multiple === true;
+    custom = first.custom === true;
   } catch {
-    prompt = block.summary;
+    // A truncated or malformed input leaves the summary as the prompt.
   }
   if (!prompt.trim() && options.length === 0) return null;
 
   return {
     requestId: toolUseId, sessionId, agent: 'opencode',
     prompt, kind: options.length > 0 ? 'select' : 'freeform', options,
-    // The answer endpoint takes arbitrary strings, so free text is always
-    // deliverable. multiSelect is absent here on purpose: the block is a
-    // fallback for a transcript that raced the question API, and it carries no
-    // flag to read — a guess would render a radio group as checkboxes.
-    allowsOther: true,
+    multiSelect: multiple ? true : undefined,
+    allowsOther: custom ? true : undefined,
     createdAt: new Date().toISOString(),
   };
 }

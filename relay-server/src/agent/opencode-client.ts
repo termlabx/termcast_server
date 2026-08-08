@@ -51,6 +51,10 @@ interface RawSession {
 export class OpencodeClient {
   /** sessionId → project directory, learned from `listSessions`. */
   private readonly directories = new Map<string, string>();
+  /** question request id → what the reply route needs, learned from `listQuestions`. */
+  private readonly questionGroups = new Map<string, { sessionId: string; count: number }>();
+  /** question request id → answers collected so far, one slot per member. */
+  private readonly questionAnswers = new Map<string, string[][]>();
 
   constructor(
     private readonly baseUrl: string,
@@ -313,43 +317,109 @@ export class OpencodeClient {
     await this.post(`/api/session/${encodeURIComponent(sessionId)}/interrupt`, {}, sessionId);
   }
 
-  /** Pending questions from opencode's question API. */
+  /**
+   * Pending questions from opencode's question API.
+   *
+   * One *request* carries several questions — the same grouping AskUserQuestion
+   * uses — so this fans out into one card per member, sharing a group id.
+   *
+   * The shape is `{ id, sessionID, questions: [{ question, header, options,
+   * multiple, custom }] }`, taken from a running server's own `/doc`. The
+   * previous reader looked for `requestId`, `prompt` and a top-level `options`,
+   * none of which exist at that level: every card it produced had a blank id, a
+   * blank prompt and no options, which is unanswerable.
+   */
   async listQuestions(sessionId: string): Promise<AgentQuestionInfo[]> {
     const body = await this.get(
       `/api/session/${encodeURIComponent(sessionId)}/question`,
       sessionId,
     );
-    return asArray((body as { data?: unknown } | null)?.data).map((q) => {
-      const r = q as Record<string, unknown>;
-      return {
-        requestId: str(r.requestId) ?? '',
-        sessionId,
-        agent: 'opencode' as const,
-        prompt: str(r.prompt) ?? '',
-        kind: (str(r.kind) === 'freeform' ? 'freeform' : 'select') as 'select' | 'freeform',
-        options: asArray(r.options).map((o) => {
+
+    const cards: AgentQuestionInfo[] = [];
+    for (const request of asArray((body as { data?: unknown } | null)?.data)) {
+      const raw = request as Record<string, unknown>;
+      const groupId = str(raw.id) ?? '';
+      if (!groupId) continue;
+      const members = asArray(raw.questions);
+      if (members.length === 0) continue;
+
+      // Remembered so the reply can be addressed: the route needs the session
+      // and the request id, and the phone only ever sends back a member id.
+      this.questionGroups.set(groupId, {
+        sessionId: str(raw.sessionID) ?? sessionId,
+        count: members.length,
+      });
+
+      members.forEach((member, index) => {
+        const q = member as Record<string, unknown>;
+        const options = asArray(q.options).map((o) => {
           const opt = o as Record<string, unknown>;
           return { label: str(opt.label) ?? '', description: str(opt.description) ?? undefined };
-        }),
-        // Absent rather than false, so the phone can tell "single answer" from
-        // "this server predates the field".
-        multiSelect: isMultiSelect(r) ? true : undefined,
-        // opencode's answer endpoint takes arbitrary strings, so an answer that
-        // is not on the list is always deliverable.
-        allowsOther: true,
-        createdAt: str(r.createdAt) ?? new Date().toISOString(),
-      };
-    });
+        });
+        cards.push({
+          requestId: memberRequestId(groupId, index),
+          sessionId,
+          agent: 'opencode' as const,
+          prompt: str(q.question) ?? '',
+          header: str(q.header) ?? undefined,
+          kind: options.length > 0 ? 'select' : 'freeform',
+          options,
+          // Absent rather than false, so the phone can tell "single answer"
+          // from "this server predates the field".
+          multiSelect: q.multiple === true ? true : undefined,
+          // opencode's own flag for "an answer not on the list is allowed".
+          allowsOther: q.custom === true ? true : undefined,
+          groupId,
+          groupIndex: index,
+          groupCount: members.length,
+          createdAt: new Date().toISOString(),
+        });
+      });
+    }
+    return cards;
   }
 
+  /**
+   * Answer one member of a question request.
+   *
+   * The reply covers the whole request — "user answers in order of questions,
+   * each answer an array of selected labels" — so nothing is sent until every
+   * member has been answered. Replying early would submit an empty selection
+   * for the questions still on screen.
+   */
   async answerQuestion(requestId: string, answers: string[]): Promise<void> {
-    // opencode's answer endpoint takes an array of answer rows (each row itself
-    // an array of parts). A flat list is silently dropped by older builds.
-    await this.post(`/api/session/question/${encodeURIComponent(requestId)}/answer`, { answers: [answers] });
+    const { groupId, index } = splitMemberRequestId(requestId);
+    const group = this.questionGroups.get(groupId);
+    if (!group) return;
+
+    const collected = this.questionAnswers.get(groupId) ?? [];
+    collected[index] = answers;
+    this.questionAnswers.set(groupId, collected);
+
+    const complete = Array.from({ length: group.count }, (_, i) => collected[i])
+      .every((entry) => entry !== undefined);
+    if (!complete) return;
+
+    this.questionGroups.delete(groupId);
+    this.questionAnswers.delete(groupId);
+    await this.post(
+      `/api/session/${encodeURIComponent(group.sessionId)}/question/${encodeURIComponent(groupId)}/reply`,
+      { answers: Array.from({ length: group.count }, (_, i) => collected[i] ?? []) },
+    );
   }
 
+  /** Rejecting any member rejects the request; opencode has no partial decline. */
   async rejectQuestion(requestId: string): Promise<void> {
-    await this.post(`/api/session/question/${encodeURIComponent(requestId)}/reject`, {});
+    const { groupId } = splitMemberRequestId(requestId);
+    const group = this.questionGroups.get(groupId);
+    if (!group) return;
+
+    this.questionGroups.delete(groupId);
+    this.questionAnswers.delete(groupId);
+    await this.post(
+      `/api/session/${encodeURIComponent(group.sessionId)}/question/${encodeURIComponent(groupId)}/reject`,
+      {},
+    );
   }
 
   private toSummary(raw: RawSession): AgentSessionSummary {
@@ -651,14 +721,19 @@ function asArray(value: unknown): unknown[] {
 }
 
 /**
- * Whether a question accepts several answers.
- *
- * Three spellings are read because opencode's runtime JSON and its own `/doc`
- * disagree often enough that committing to one is a bug waiting to happen (the
- * message/part vs session_message split is the same story). Reading all three
- * costs nothing; guessing wrong renders a multi-answer question as a radio
- * group, which silently discards every choice but one.
+ * Cards are addressed per member, replies per request. The separator carries
+ * the position so the two can be mapped back onto each other.
  */
-function isMultiSelect(raw: Record<string, unknown>): boolean {
-  return raw.multiple === true || raw.multiSelect === true || raw.multi === true;
+function memberRequestId(groupId: string, index: number): string {
+  return `${groupId}#${index}`;
+}
+
+function splitMemberRequestId(requestId: string): { groupId: string; index: number } {
+  const hash = requestId.lastIndexOf('#');
+  if (hash < 0) return { groupId: requestId, index: 0 };
+  const index = Number(requestId.slice(hash + 1));
+  return {
+    groupId: requestId.slice(0, hash),
+    index: Number.isInteger(index) && index >= 0 ? index : 0,
+  };
 }

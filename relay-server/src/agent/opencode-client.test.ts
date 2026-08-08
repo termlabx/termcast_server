@@ -500,78 +500,166 @@ test('listSessions: a session whose messages are only in the v2 store still list
   }
 });
 
-test('answerQuestion: pins the opencode body to the nested [answers] shape', async () => {
-  // opencode's answer endpoint expects `answers` as an array of answer rows —
-  // `[["B"]]` for a single select choice, each row itself an array of parts.
-  // Sending a flat `["B"]` silently drops every answer on older opencode builds.
+test('answerQuestion: pins the opencode body to the nested [answers] shape', async (t) => {
+  // opencode's reply endpoint expects `answers` as an array of answer rows —
+  // `[["B"]]` for a single select choice, each row itself an array of selected
+  // labels. Sending a flat `["B"]` silently drops every answer.
+  //
+  // The route this originally asserted (/api/session/question/{id}/answer) does
+  // not exist on any opencode build: a running server's own /doc lists
+  // POST /api/session/{sessionID}/question/{requestID}/reply. The nested body
+  // was right; the address was not, so answering never landed.
   const seen: { path: string; body: unknown; directory?: string }[] = [];
-  const s = await stub({ 'POST /api/session/question/q_1/answer': { ok: true } }, seen);
+  const { url, stop } = await stub({
+    'GET /api/session/ses_abc/question': {
+      data: [{
+        id: 'que_1',
+        sessionID: 'ses_abc',
+        questions: [{ question: 'Pick', header: 'H', options: [{ label: 'B', description: 'b' }] }],
+      }],
+    },
+    'POST /api/session/ses_abc/question/que_1/reply': { ok: true },
+  }, seen);
+  t.after(() => stop());
 
-  try {
-    await new OpencodeClient(s.url).answerQuestion('q_1', ['B']);
+  const client = new OpencodeClient(url, '/tmp');
+  const [card] = await client.listQuestions('ses_abc');
+  await client.answerQuestion(card.requestId, ['B']);
 
-    assert.deepEqual(seen.map((r) => r.path), ['/api/session/question/q_1/answer']);
-    assert.deepEqual(seen[0].body, { answers: [['B']] });
-  } finally {
-    await s.stop();
-  }
+  const reply = seen.find((r) => r.path.endsWith('/reply'));
+  assert.ok(reply, 'the reply lands on the documented route');
+  assert.equal(reply.path, '/api/session/ses_abc/question/que_1/reply');
+  assert.deepEqual(reply.body, { answers: [['B']] });
 });
 
 // --- question fidelity -----------------------------------------------------
 
-test('listQuestions: carries descriptions and multiSelect through', async () => {
-  const { url, stop } = await stub({
-    'GET /api/session/ses_abc/question': {
-      data: [{
-        requestId: 'q1',
-        prompt: 'Which approach?',
-        kind: 'select',
-        multiple: true,
+/**
+ * The real shape, taken verbatim from a running server's own `/doc`
+ * (`QuestionRequest` -> `QuestionInfo`). The previous reader looked for
+ * `requestId`, `prompt` and a top-level `options`, none of which exist: the
+ * request is a *group*, and every field it wanted lives one level down.
+ */
+const QUESTION_REQUEST = {
+  data: [{
+    id: 'que_abc',
+    sessionID: 'ses_abc',
+    questions: [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        multiple: false,
+        custom: true,
         options: [
           { label: 'Rewrite', description: 'Slower but cleaner' },
-          { label: 'Patch' },
+          { label: 'Patch', description: 'Ships today' },
         ],
-      }],
-    },
-  });
-
-  const client = new OpencodeClient(url, '/tmp');
-  const [question] = await client.listQuestions('ses_abc');
-  await stop();
-
-  assert.equal(question.multiSelect, true);
-  assert.equal(question.options[0].description, 'Slower but cleaner');
-  assert.equal(question.options[1].description, undefined);
-  // The answer endpoint takes arbitrary strings, so free text is always usable.
-  assert.equal(question.allowsOther, true);
-});
-
-// opencode's runtime JSON and its own /doc disagree about field names often
-// enough that guessing one spelling is a bug waiting to happen.
-test('listQuestions: accepts either spelling of the multi-select flag', async () => {
-  for (const key of ['multiple', 'multiSelect', 'multi']) {
-    const { url, stop } = await stub({
-      'GET /api/session/ses_abc/question': {
-        data: [{ requestId: 'q1', prompt: 'p', options: [{ label: 'A' }], [key]: true }],
       },
-    });
-    const client = new OpencodeClient(url, '/tmp');
-    const [question] = await client.listQuestions('ses_abc');
-    await stop();
-    assert.equal(question.multiSelect, true, `expected ${key} to be read`);
-  }
-});
+      {
+        question: 'Which features?',
+        header: 'Features',
+        multiple: true,
+        options: [{ label: 'Auth', description: 'a' }, { label: 'Billing', description: 'b' }],
+      },
+    ],
+  }],
+};
 
-test('listQuestions: a single-answer question omits multiSelect rather than sending false', async () => {
-  const { url, stop } = await stub({
-    'GET /api/session/ses_abc/question': {
-      data: [{ requestId: 'q1', prompt: 'p', options: [{ label: 'A' }] }],
-    },
-  });
+test('listQuestions: reads the real nested shape rather than an empty card', async (t) => {
+  const { url, stop } = await stub({ 'GET /api/session/ses_abc/question': QUESTION_REQUEST });
+  t.after(() => stop());
 
   const client = new OpencodeClient(url, '/tmp');
-  const [question] = await client.listQuestions('ses_abc');
-  await stop();
+  const questions = await client.listQuestions('ses_abc');
 
-  assert.equal(question.multiSelect, undefined);
+  assert.equal(questions.length, 2);
+  assert.equal(questions[0].prompt, 'Which approach?');
+  assert.equal(questions[0].header, 'Approach');
+  assert.equal(questions[0].options[0].description, 'Slower but cleaner');
+  assert.equal(questions[0].kind, 'select');
+  // A blank requestId is unanswerable, which is what the old reader produced.
+  assert.ok(questions[0].requestId.startsWith('que_abc'));
+});
+
+test('listQuestions: one request fans out into a group, like AskUserQuestion', async (t) => {
+  const { url, stop } = await stub({ 'GET /api/session/ses_abc/question': QUESTION_REQUEST });
+  t.after(() => stop());
+
+  const client = new OpencodeClient(url, '/tmp');
+  const questions = await client.listQuestions('ses_abc');
+
+  assert.equal(questions[0].groupId, questions[1].groupId);
+  assert.equal(questions[0].groupCount, 2);
+  assert.equal(questions[0].groupIndex, 0);
+  assert.equal(questions[1].groupIndex, 1);
+  assert.notEqual(questions[0].requestId, questions[1].requestId);
+});
+
+test('listQuestions: multiple and custom drive multiSelect and allowsOther', async (t) => {
+  const { url, stop } = await stub({ 'GET /api/session/ses_abc/question': QUESTION_REQUEST });
+  t.after(() => stop());
+
+  const client = new OpencodeClient(url, '/tmp');
+  const questions = await client.listQuestions('ses_abc');
+
+  // Absent rather than false, so the phone can tell "single answer" from
+  // "this server predates the field".
+  assert.equal(questions[0].multiSelect, undefined);
+  assert.equal(questions[1].multiSelect, true);
+  // `custom` is opencode's own "an answer not on the list is allowed" flag.
+  assert.equal(questions[0].allowsOther, true);
+  assert.equal(questions[1].allowsOther, undefined);
+});
+
+test('answerQuestion: posts the documented reply route once the group is complete', async (t) => {
+  const seen: { path: string; body: unknown }[] = [];
+  const { url, stop } = await stub({
+    'GET /api/session/ses_abc/question': QUESTION_REQUEST,
+    'POST /api/session/ses_abc/question/que_abc/reply': { ok: true },
+  }, seen);
+  t.after(() => stop());
+  t.after(() => stop());
+
+  const client = new OpencodeClient(url, '/tmp');
+  const questions = await client.listQuestions('ses_abc');
+
+  await client.answerQuestion(questions[0].requestId, ['Rewrite']);
+  // One member answered is not the whole request; replying now would submit an
+  // empty selection for the other question.
+  assert.equal(seen.filter((r) => r.path.endsWith('/reply')).length, 0);
+
+  await client.answerQuestion(questions[1].requestId, ['Auth', 'Billing']);
+
+  const reply = seen.find((r) => r.path.endsWith('/reply'));
+  assert.ok(reply, 'the reply lands on /api/session/{sessionID}/question/{requestID}/reply');
+  // "User answers in order of questions (each answer is an array of selected labels)"
+  assert.deepEqual(reply.body, { answers: [['Rewrite'], ['Auth', 'Billing']] });
+});
+
+test('rejectQuestion: rejects the whole request on the documented route', async (t) => {
+  const seen: { path: string; body: unknown }[] = [];
+  const { url, stop } = await stub({
+    'GET /api/session/ses_abc/question': QUESTION_REQUEST,
+    'POST /api/session/ses_abc/question/que_abc/reject': { ok: true },
+  }, seen);
+  t.after(() => stop());
+  t.after(() => stop());
+
+  const client = new OpencodeClient(url, '/tmp');
+  const questions = await client.listQuestions('ses_abc');
+  await client.rejectQuestion(questions[1].requestId);
+
+  assert.ok(seen.some((r) => r.path === '/api/session/ses_abc/question/que_abc/reject'));
+});
+
+test('listQuestions: a request with no questions yields nothing rather than a blank card', async (t) => {
+  const { url, stop } = await stub({
+    'GET /api/session/ses_abc/question': { data: [{ id: 'que_x', sessionID: 'ses_abc', questions: [] }] },
+  });
+  t.after(() => stop());
+
+  const client = new OpencodeClient(url, '/tmp');
+  const questions = await client.listQuestions('ses_abc');
+
+  assert.deepEqual(questions, []);
 });
