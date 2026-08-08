@@ -2,7 +2,7 @@
   "name": "termcast-desktop",
   "productName": "Termcast",
   "license": "AGPL-3.0-or-later",
-  "version": "0.175.0",
+  "version": "0.176.0",
   "author": "ulixlab@2026",
   "copyright": "Copyright © 2026 ulixlab",
   "main": "dist/main.js",
