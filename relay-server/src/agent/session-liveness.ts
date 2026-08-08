@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readdir, readFile, readlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import type { AgentKind } from './types.js';
 import { readLiveSessions, type LiveSession } from './session-registry.js';
@@ -38,7 +39,7 @@ export class SessionLiveness {
 
   constructor(opts: SessionLivenessOptions = {}) {
     this.liveSessions = opts.liveSessions ?? (() => readLiveSessions());
-    this.processes = opts.processes ?? listProcesses;
+    this.processes = opts.processes ?? defaultProcessLister();
   }
 
   async isAlive(agent: AgentKind, sessionId: string, projectPath: string): Promise<boolean> {
@@ -78,14 +79,72 @@ export class SessionLiveness {
   }
 }
 
+/** The `/proc` reads the Linux lister needs, as a test seam. */
+export interface ProcFs {
+  readdir(path: string): Promise<string[]>;
+  readFile(path: string): Promise<string>;
+  readlink(path: string): Promise<string>;
+}
+
+const realProcFs: ProcFs = {
+  readdir: (path) => readdir(path),
+  readFile: (path) => readFile(path, 'utf8'),
+  readlink: (path) => readlink(path),
+};
+
 /**
- * Every running `opencode`, with its working directory.
+ * Pick the process lister for this platform.
+ *
+ * Linux gets `/proc`, not pgrep+lsof: lsof is absent from most server and
+ * container images (Debian slim, Alpine), and the shell-out lister treats "no
+ * lsof" as "nothing is running" — which offers a session a desk TUI is holding
+ * for headless resume and forks a second agent behind it. Reading `/proc` needs
+ * no external binary at all.
+ */
+export function defaultProcessLister(platform: string = process.platform): ProcessLister {
+  return platform === 'linux' ? listProcProcesses : listPgrepProcesses;
+}
+
+/**
+ * Every running `opencode`, with its working directory, read from `/proc`.
+ *
+ * `/proc/<pid>/comm` is the process name and `/proc/<pid>/cwd` a symlink to its
+ * working directory. Anything unreadable is skipped rather than guessed at: a
+ * pid can exit mid-scan, and another user's `cwd` link is EACCES.
+ */
+export async function listProcProcesses(fs: ProcFs = realProcFs): Promise<RunningProcess[]> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir('/proc');
+  } catch {
+    return [];
+  }
+
+  const pids = entries.map((e) => Number(e)).filter((n) => Number.isInteger(n) && n > 0);
+  const out: RunningProcess[] = [];
+  await Promise.all(pids.map(async (pid) => {
+    try {
+      // comm is truncated to 15 characters by the kernel; 'opencode' fits, and
+      // matching it exactly mirrors what `pgrep -x opencode` finds on macOS.
+      const comm = (await fs.readFile(`/proc/${pid}/comm`)).trim();
+      if (comm !== 'opencode') return;
+      const cwd = await fs.readlink(`/proc/${pid}/cwd`);
+      if (cwd) out.push({ pid, cwd, command: 'opencode' });
+    } catch {
+      // Exited between readdir and here, or not ours to inspect.
+    }
+  }));
+  return out.sort((a, b) => a.pid - b.pid);
+}
+
+/**
+ * Every running `opencode`, with its working directory, via external tools.
  *
  * `ps` cannot print a process's cwd, so the pids come from `pgrep` and each cwd
- * from `lsof -a -p <pid> -d cwd`. Both are POSIX-ish and present on macOS and
- * Linux; any failure degrades to an empty list.
+ * from `lsof -a -p <pid> -d cwd`. Used on macOS, where both always exist; any
+ * failure degrades to an empty list.
  */
-async function listProcesses(): Promise<RunningProcess[]> {
+export async function listPgrepProcesses(): Promise<RunningProcess[]> {
   const { stdout: pidList } = await execFileAsync('pgrep', ['-x', 'opencode'], { timeout: PS_TIMEOUT_MS });
   const pids = pidList.split('\n').map((l) => Number(l.trim())).filter((n) => Number.isInteger(n) && n > 0);
   if (pids.length === 0) return [];
