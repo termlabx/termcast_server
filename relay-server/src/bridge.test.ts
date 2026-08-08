@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { Bridge, localWsUrlFor, coalesceOutputFrames } from './bridge.js';
 import { AGENT_EVENT } from './agent/frames.js';
 import * as crypto from './crypto.js';
+import { agentLogRing } from './agent-log.js';
 
 const MSG_HANDSHAKE = 0x01;
 const MSG_HANDSHAKE_ACK = 0x02;
@@ -525,4 +526,20 @@ test('sendAgentFrame: logs server→phone events', () => {
 
   assert.ok(lines.some((l) => l.startsWith('[agent] <- conn=1 session=s1 type=status value=error') && l.includes('detail=boom')),
     `expected a status log line, got: ${lines.join('\n')}`);
+});
+
+test('an agent frame lands in the ring the Web UI serves, not only on stdout', () => {
+  // The tray reads the [agent] lines off stdout; a CLI install has nobody doing
+  // that, so the same call must also feed the in-process ring.
+  const before = agentLogRing.lastSeq;
+  const { bridge, sendInner } = makeBridgeWithSession();
+
+  sendInner(Buffer.concat([
+    Buffer.from([0x62]),
+    Buffer.from(JSON.stringify({ agent: 'claude', sessionId: 's1', sinceSeq: 7 })),
+  ]));
+
+  const rows = agentLogRing.rowsSince(before);
+  assert.deepEqual(rows.map(r => [r.direction, r.scope, r.type]), [['in', 'claude s1', 'attach']]);
+  bridge.stop();
 });

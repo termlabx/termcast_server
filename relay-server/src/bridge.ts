@@ -5,6 +5,7 @@ import * as crypto from './crypto.js';
 import { PortForwardHandler } from './port-forward.js';
 import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
 import type { TerminalTarget } from './terminal-targets.js';
+import { agentLogRing } from './agent-log.js';
 import {
   AGENT_LIST, AGENT_ATTACH, AGENT_DETACH, AGENT_HISTORY,
   AGENT_SEND, AGENT_INTERRUPT, AGENT_PERMISSION, AGENT_QUESTION,
@@ -108,8 +109,13 @@ interface ClientSession {
 
 /** One parseable [agent] log line; the desktop tray parses these (see
  *  relay-desktop/src/server-agent-log-parser.ts). Values with whitespace or
- *  quotes are JSON-quoted so a parser can split on `key=value` tokens. */
+ *  quotes are JSON-quoted so a parser can split on `key=value` tokens.
+ *
+ *  The same record also goes into agentLogRing, which backs the Web UI's
+ *  /agent-log page — the tray is not the only reader, and a CLI install has
+ *  nobody watching this stdout at all. */
 function agentLog(dir: '->' | '<-', fields: Record<string, unknown>): void {
+  agentLogRing.record(dir, fields);
   const parts = Object.entries(fields).map(([k, v]) => {
     if (v === null) return `${k}=null`;
     // Arrays interpolate to `a,b` — a value with a space in it would then split

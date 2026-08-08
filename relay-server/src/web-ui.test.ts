@@ -4,6 +4,7 @@ import * as net from 'node:net';
 import { WebUI } from './web-ui.js';
 import type { Multiplexer } from './multiplexer.js';
 import { generatePairingInfo } from './pairing.js';
+import { AgentLogRing } from './agent-log.js';
 
 function samplePairing() {
   return generatePairingInfo('wss://r', Buffer.alloc(32, 1), 'dev1');
@@ -259,4 +260,74 @@ test('POST /api/agent/permission: a malformed body yields no decision rather tha
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {});
   await stop();
+});
+
+test('GET /agent-log serves the agent log page', async () => {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/agent-log`);
+  assert.equal(resp.status, 200);
+  assert.match(resp.headers.get('content-type') ?? '', /text\/html/);
+  const body = await resp.text();
+  assert.ok(body.includes('Agent Log'));
+  assert.ok(body.includes('/api/agent/log'));
+});
+
+test('GET /api/agent/log serves the ring the daemon filled', async () => {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const ring = new AgentLogRing(10);
+  ring.record('->', { conn: 1, agent: 'claude', session: 's1', type: 'send', text: 'hi' });
+  ui.setAgentLogRing(ring);
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/agent/log`);
+  assert.equal(resp.status, 200);
+  const body = await resp.json() as { rows: { type: string; detail: string }[]; lastSeq: number };
+  assert.deepEqual(body.rows.map(r => r.type), ['send']);
+  assert.equal(body.rows[0].detail, '"hi"');
+  assert.equal(body.lastSeq, 1);
+});
+
+test('GET /api/agent/log?since= returns only rows the poller has not seen', async () => {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const ring = new AgentLogRing(10);
+  ring.record('->', { conn: 1, type: 'list' });
+  ring.record('->', { conn: 1, type: 'detach' });
+  ui.setAgentLogRing(ring);
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/agent/log?since=1`);
+  const body = await resp.json() as { rows: { type: string }[] };
+  assert.deepEqual(body.rows.map(r => r.type), ['detach']);
+});
+
+test('GET /api/agent/log with a junk since returns the whole ring rather than nothing', async () => {
+  // A missing or malformed cursor must not silently produce an empty page.
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const ring = new AgentLogRing(10);
+  ring.record('->', { conn: 1, type: 'list' });
+  ui.setAgentLogRing(ring);
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/agent/log?since=abc`);
+  const body = await resp.json() as { rows: unknown[] };
+  assert.equal(body.rows.length, 1);
+});
+
+test('GET /api/agent/log before anything is wired reports an empty log', async () => {
+  const ui = new WebUI();
+  await ui.start(await freePort());
+  after(() => ui.stop());
+
+  const resp = await fetch(`http://127.0.0.1:${ui.port}/api/agent/log`);
+  assert.equal(resp.status, 200);
+  assert.deepEqual(await resp.json(), { rows: [], lastSeq: 0 });
 });

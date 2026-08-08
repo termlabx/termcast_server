@@ -26,6 +26,7 @@ import { generatePairingInfo, displayQRCode } from './pairing.js';
 import { resolveRelayUrl, relayHttpUrl } from './relay-url.js';
 import { wrapSecret } from './pairing-wrap.js';
 import { WebUI } from './web-ui.js';
+import { agentLogRing } from './agent-log.js';
 import { MeshClient, type MeshPeer } from './mesh-client.js';
 import type { StatusSnapshot, ClientStatus } from './status.js';
 import { formatStatus } from './status.js';
@@ -775,6 +776,10 @@ program
       broker: permissionBroker,
       isAttached: (id) => attachments.isAttached(id),
     });
+
+    // The trace behind /agent-log. The desktop tray builds the same view from
+    // this process's stdout; a CLI install reads it here instead.
+    webUI.setAgentLogRing(agentLogRing);
 
     // CLI-driven forward add/remove (POST /api/mesh/forwards).
     webUI.setMeshForwardHandler((raw: unknown) => {

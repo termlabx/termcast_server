@@ -3,6 +3,7 @@ import { createConnection } from 'node:net';
 import { PairingInfo, getQRCodeDataURL, getQRCodeText } from './pairing.js';
 import { type Multiplexer, MULTIPLEXERS } from './multiplexer.js';
 import type { PermissionBroker } from './agent/permission-broker.js';
+import type { AgentLogRing } from './agent-log.js';
 
 export class WebUI {
   private server: Server | null = null;
@@ -75,6 +76,13 @@ export class WebUI {
     isAttached: (sessionId: string) => boolean;
   }): void {
     this.permissionHandler = h;
+  }
+
+  private agentLogRing: AgentLogRing | null = null;
+
+  /** Backs GET /api/agent/log and the /agent-log page. */
+  setAgentLogRing(ring: AgentLogRing): void {
+    this.agentLogRing = ring;
   }
 
   setPairing(pairing: PairingInfo): void {
@@ -332,6 +340,25 @@ export class WebUI {
         return;
       }
 
+      if (req.url?.startsWith('/api/agent/log')) {
+        // `since` is a cursor, not a filter: a junk value must serve the whole
+        // ring rather than an empty page that looks like "no traffic".
+        const since = Number(new URL(req.url, 'http://localhost').searchParams.get('since'));
+        const cursor = Number.isFinite(since) && since > 0 ? since : 0;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          rows: this.agentLogRing?.rowsSince(cursor) ?? [],
+          lastSeq: this.agentLogRing?.lastSeq ?? 0,
+        }));
+        return;
+      }
+
+      if (req.url === '/agent-log') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(AGENT_LOG_PAGE);
+        return;
+      }
+
       if (req.url === '/api/mesh') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(this.meshPeersProvider()));
@@ -365,8 +392,11 @@ h1{margin:0 0 1rem}img{border-radius:.5rem}p{color:#787c99;font-size:.9rem}
 .peers a{display:block;color:#7aa2f7;margin:.25rem 0;text-decoration:none}
 .peers a:hover{text-decoration:underline}
 .peers-title{color:#c0caf5;font-size:.85rem;font-weight:600;margin-bottom:.4rem}
-.fwd{color:#787c99;font-size:.8rem;margin:.1rem 0 .1rem .75rem}</style></head>
-<body><div class="card"><h1>Termcast Server</h1><div id="qr"></div><p id="status">Loading...</p><div id="peers"></div></div>
+.fwd{color:#787c99;font-size:.8rem;margin:.1rem 0 .1rem .75rem}
+.links{margin:.9rem 0 0}.links a{color:#7aa2f7;font-size:.85rem;text-decoration:none}
+.links a:hover{text-decoration:underline}</style></head>
+<body><div class="card"><h1>Termcast Server</h1><div id="qr"></div><p id="status">Loading...</p><div id="peers"></div>
+<p class="links"><a href="/agent-log">Agent Log</a></p></div>
 <script>
 // Peer names/ports come from the phone's mesh invite (a peer machine's OS
 // hostname) and are untrusted, so escape every peer-derived value before it
@@ -578,4 +608,78 @@ async function load(force){
   div.innerHTML=h;
 }
 load(true);setInterval(()=>load(false),5000);
+</script></body></html>`;
+
+// The CLI's Agent Log: the same trace the desktop tray shows, for installs that
+// have no tray. Rows are pulled incrementally with a `since` cursor rather than
+// re-fetched, so a long-lived page costs one small response per second.
+//
+// Every value on a row originates off the wire — prompts and answers typed on a
+// phone, session names from a multiplexer — so nothing reaches innerHTML
+// unescaped. Same guard as the /forwards and index pages.
+const AGENT_LOG_PAGE = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Agent Log</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui;background:#1a1b26;color:#c0caf5;margin:0;padding:1rem;height:100vh;display:flex;flex-direction:column}
+h1{font-size:1.1rem;margin:0 0 .35rem}
+.sub{color:#787c99;font-size:.8rem;margin:0 0 .8rem}
+.bar{display:flex;gap:.6rem;align-items:center;margin-bottom:.6rem;flex-wrap:wrap}
+input[type=search]{flex:1;min-width:12rem;background:#24283b;border:1px solid #414868;border-radius:.4rem;color:#c0caf5;padding:.4rem .6rem;font-size:.85rem}
+label{color:#787c99;font-size:.8rem;display:flex;align-items:center;gap:.3rem}
+button{background:#414868;border:none;border-radius:.4rem;color:#c0caf5;padding:.35rem .7rem;font-size:.8rem;cursor:pointer}
+button:hover{background:#565f89}
+.wrap{flex:1;overflow:auto;background:#24283b;border-radius:.6rem}
+table{width:100%;border-collapse:collapse;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem}
+td{padding:.25rem .5rem;vertical-align:top;border-bottom:1px solid #1f2335}
+tr:hover{background:#2a2f45}
+.t{color:#565f89;white-space:nowrap}
+.d{white-space:nowrap;font-weight:600}
+.d.in{color:#9ece6a}.d.out{color:#7aa2f7}
+.s{color:#bb9af7;white-space:nowrap}
+.ty{color:#e0af68;white-space:nowrap}
+.de{color:#a9b1d6;word-break:break-word}
+.empty{color:#787c99;font-size:.85rem;padding:1rem;text-align:center}
+</style></head>
+<body>
+<h1>Agent Log</h1>
+<p class="sub">Agent chat traffic between this machine and paired phones. <span class="d in">in</span> is phone&nbsp;&rarr;&nbsp;server, <span class="d out">out</span> is server&nbsp;&rarr;&nbsp;phone.</p>
+<div class="bar">
+  <input type="search" id="filter" placeholder="Filter (session, type, text)&hellip;" autocomplete="off">
+  <label><input type="checkbox" id="follow" checked> Follow</label>
+  <button id="clear">Clear</button>
+</div>
+<div class="wrap" id="wrap"><div class="empty" id="empty">Waiting for agent traffic&hellip;</div><table><tbody id="rows"></tbody></table></div>
+<script>
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+var since=0,all=[];
+var wrap=document.getElementById('wrap'),body=document.getElementById('rows');
+var filter=document.getElementById('filter'),follow=document.getElementById('follow'),empty=document.getElementById('empty');
+function matches(row){var q=filter.value.trim().toLowerCase();return !q||row.search.indexOf(q)>=0}
+function html(row){
+  return '<tr><td class="t">'+esc(row.time)+'</td><td class="d '+(row.direction==='in'?'in':'out')+'">'
+    +(row.direction==='in'?'&uarr; in':'&darr; out')+'</td><td class="s">'+esc(row.scope)
+    +'</td><td class="ty">'+esc(row.type)+'</td><td class="de">'+esc(row.detail)+'</td></tr>';
+}
+function repaint(){
+  var shown=all.filter(matches);
+  body.innerHTML=shown.map(html).join('');
+  empty.style.display=shown.length?'none':'block';
+  if(follow.checked)wrap.scrollTop=wrap.scrollHeight;
+}
+async function poll(){
+  try{
+    var r=await fetch('/api/agent/log?since='+since);
+    if(!r.ok)return;
+    var d=await r.json();
+    if(!d.rows.length)return;
+    since=d.lastSeq;
+    all=all.concat(d.rows).slice(-1000);
+    repaint();
+  }catch(e){/* daemon restarting — the next tick picks up again */}
+}
+filter.addEventListener('input',repaint);
+document.getElementById('clear').addEventListener('click',function(){all=[];repaint()});
+poll();setInterval(poll,1000);
 </script></body></html>`;
