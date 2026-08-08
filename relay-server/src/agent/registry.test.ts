@@ -207,3 +207,68 @@ test('list: a desk agent that is merely working does not need attention', async 
 
   assert.equal((await registry.list())[0].needsAttention, false);
 });
+
+// --- pending question replay ----------------------------------------------
+
+/**
+ * Raises its question only on the *first* subscribe, which is what makes the
+ * replay observable: a fake that re-asks on every subscribe would pass whether
+ * or not the registry remembered anything.
+ */
+function onceQuestioningAdapter(
+  extra?: (onEvent: (e: AgentEvent) => void) => void,
+): AgentAdapter {
+  let raised = false;
+  return {
+    kind: 'claude',
+    list: async () => [],
+    history: async () => ({ messages: [], hasMore: false }),
+    subscribe: async (_sessionId: string, _sinceSeq: number, onEvent: (e: AgentEvent) => void) => {
+      if (!raised) {
+        raised = true;
+        onEvent({
+          kind: 'question', sessionId: 's1', seq: 1,
+          request: {
+            requestId: 'r1', sessionId: 's1', agent: 'claude', prompt: 'Pick',
+            kind: 'select', options: [{ label: 'A' }], createdAt: '2026-08-07T00:00:00.000Z',
+          },
+        });
+        extra?.(onEvent);
+      }
+      return () => {};
+    },
+    send: async () => {},
+    interrupt: async () => {},
+    respondPermission: async () => {},
+    respondQuestion: async () => {},
+  } as unknown as AgentAdapter;
+}
+
+test('subscribing again replays a question that is still pending', async () => {
+  const registry = new AgentRegistry([onceQuestioningAdapter()]);
+  await registry.subscribe('claude', 's1', 0, () => {});
+
+  // The relay dropped and the phone came back. The agent is still waiting, so
+  // the card has to reappear — nothing else would tell the phone about it.
+  const second: AgentEvent[] = [];
+  await registry.subscribe('claude', 's1', 0, (e) => second.push(e));
+
+  const replayed = second.filter((e) => e.kind === 'question');
+  assert.equal(replayed.length, 1);
+  assert.equal(replayed[0].kind === 'question' && replayed[0].request.requestId, 'r1');
+});
+
+test('a resolved question is not replayed', async () => {
+  const registry = new AgentRegistry([onceQuestioningAdapter((onEvent) => {
+    onEvent({
+      kind: 'questionResolved', sessionId: 's1', seq: 2,
+      requestId: 'r1', outcome: 'answered',
+    });
+  })]);
+  await registry.subscribe('claude', 's1', 0, () => {});
+
+  const second: AgentEvent[] = [];
+  await registry.subscribe('claude', 's1', 0, (e) => second.push(e));
+
+  assert.equal(second.filter((e) => e.kind === 'question').length, 0);
+});

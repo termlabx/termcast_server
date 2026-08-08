@@ -1,5 +1,5 @@
 import type { AgentAdapter, AgentEvent, HistoryPage, Unsubscribe } from './adapter.js';
-import type { AgentKind, AgentSessionSummary } from './types.js';
+import type { AgentKind, AgentQuestionInfo, AgentSessionSummary } from './types.js';
 import { SessionLiveness } from './session-liveness.js';
 import { defaultDeskRegistry, type DeskRegistry } from './desk-target.js';
 
@@ -108,10 +108,49 @@ export class AgentRegistry {
   async subscribe(kind: AgentKind, sessionId: string, sinceSeq: number, onEvent: (event: AgentEvent) => void): Promise<Unsubscribe> {
     const adapter = this.adapterFor(kind);
     if (!adapter) return () => {};
+
+    const wrapped = (event: AgentEvent): void => {
+      this.trackQuestion(event);
+      onEvent(event);
+    };
+
     try {
-      return await adapter.subscribe(sessionId, sinceSeq, onEvent);
+      const stop = await adapter.subscribe(sessionId, sinceSeq, wrapped);
+      // Replayed after the adapter is up, so a reattaching phone sees its
+      // outstanding cards alongside the history it asked for. The relay drops
+      // and reconnects routinely, and a question that outlived the socket is
+      // still holding the agent — without this it holds it invisibly.
+      for (const request of this.pendingQuestions(sessionId)) {
+        onEvent({ kind: 'question', sessionId, seq: request.groupIndex ?? 0, request });
+      }
+      return stop;
     } catch {
       return () => {};
     }
+  }
+
+  /**
+   * Questions raised but not yet resolved, keyed by session.
+   *
+   * Deliberately mirrors the event stream rather than asking the adapters:
+   * `canUseTool` promises, desk dialogs and opencode's question API have three
+   * different lifecycles, and the one thing they share is that they all announce
+   * themselves here.
+   */
+  private readonly liveQuestions = new Map<string, Map<string, AgentQuestionInfo>>();
+
+  private trackQuestion(event: AgentEvent): void {
+    if (event.kind === 'question') {
+      const forSession = this.liveQuestions.get(event.sessionId) ?? new Map();
+      forSession.set(event.request.requestId, event.request);
+      this.liveQuestions.set(event.sessionId, forSession);
+    } else if (event.kind === 'questionResolved') {
+      this.liveQuestions.get(event.sessionId)?.delete(event.requestId);
+    }
+  }
+
+  /** Outstanding questions for a session, oldest first. */
+  pendingQuestions(sessionId: string): AgentQuestionInfo[] {
+    return [...(this.liveQuestions.get(sessionId)?.values() ?? [])];
   }
 }
