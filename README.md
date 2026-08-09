@@ -16,6 +16,14 @@ Phone  ⟷  Cloudflare Relay  ⟷  termcast (this repo)  ⟷  local shell
 
 The mobile apps and the relay service itself are not part of this repository.
 
+## Demo
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=1EaCLZ7fSUw">
+    <img src="assets/youtube-demo.jpg" width="560" alt="Termcast demo video on YouTube" />
+  </a>
+</p>
+
 <p align="center">
   <img src="assets/talk_135x_cut_redacted.gif" width="280" alt="Termcast demo — your terminal on your phone" />
 </p>
