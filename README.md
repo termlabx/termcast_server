@@ -19,7 +19,13 @@ The mobile apps and the relay service itself are not part of this repository.
 ## Demo
 
 <p align="center">
-  <img src="assets/youtube-demo.gif" width="480" alt="Termcast demo — terminal on your phone" />
+  <a href="https://youtu.be/1EaCLZ7fSUw">
+    <img src="assets/youtube-demo.gif" width="480" alt="Termcast demo — terminal on your phone" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/1EaCLZ7fSUw">Watch the full demo on YouTube</a>
 </p>
 
 <p align="center">
