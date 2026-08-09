@@ -22,6 +22,12 @@ The mobile apps and the relay service itself are not part of this repository.
   <img src="assets/youtube-demo.gif" width="480" alt="Termcast demo — terminal on your phone" />
 </p>
 
+<p align="center">
+  <video autoplay loop muted playsinline width="280">
+    <source src="assets/opencode.mp4" type="video/mp4" />
+  </video>
+</p>
+
 ## Install
 
 ```bash
