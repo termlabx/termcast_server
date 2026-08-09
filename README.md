@@ -19,19 +19,7 @@ The mobile apps and the relay service itself are not part of this repository.
 ## Demo
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=1EaCLZ7fSUw">
-    <img src="assets/youtube-demo.jpg" width="560" alt="Termcast demo video on YouTube" />
-  </a>
-</p>
-
-<p align="center">
-  <img src="assets/talk_135x_cut_redacted.gif" width="280" alt="Termcast demo — your terminal on your phone" />
-</p>
-
-<p align="center">
-  <video autoplay loop muted playsinline width="280">
-    <source src="assets/opencode.mp4" type="video/mp4" />
-  </video>
+  <img src="assets/youtube-demo.gif" width="480" alt="Termcast demo — terminal on your phone" />
 </p>
 
 ## Install
