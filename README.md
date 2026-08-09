@@ -23,9 +23,8 @@ The mobile apps and the relay service itself are not part of this repository.
 </p>
 
 <p align="center">
-  <video autoplay loop muted playsinline width="280">
-    <source src="assets/opencode.mp4" type="video/mp4" />
-  </video>
+  <img src="assets/talk_135x_cut_redacted.gif" width="280" alt="Termcast demo — your terminal on your phone" />
+  <img src="assets/opencode.gif" width="200" alt="Termcast demo — opencode in your terminal" />
 </p>
 
 ## Install
