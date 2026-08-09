@@ -16,6 +16,8 @@ Phone  ⟷  Cloudflare Relay  ⟷  termcast (this repo)  ⟷  local shell
 
 The mobile apps and the relay service itself are not part of this repository.
 
+> **[Download the Termcast app on the App Store](https://apps.apple.com/jp/app/termcast/id6761039727?l=en-US)** — control your terminal from your iPhone.
+
 ## Demo
 
 <p align="center">
