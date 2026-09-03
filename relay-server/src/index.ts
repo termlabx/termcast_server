@@ -1229,6 +1229,34 @@ function readRunningState(): RunningState | null {
   return isPidAlive(state.pid, process.kill.bind(process)) ? state : null;
 }
 
+/** Which supervisor `scripts/install.sh` set up for this install, mirrored
+ * to a plain file because the wrapper's own choice is baked into a bash
+ * script this process can't easily introspect. Missing file (pre-migration
+ * installs, or npm installs which never run install.sh) means 'loop'. */
+function readServiceManager(): 'launchd' | 'systemd' | 'loop' {
+  try {
+    const raw = readFileSync(join(homedir(), '.termcast', 'service-manager'), 'utf-8').trim();
+    if (raw === 'launchd' || raw === 'systemd') return raw;
+  } catch {}
+  return 'loop';
+}
+
+/** Whether the native service job is currently registered (loaded), regardless
+ * of whether it's actively running — matches what 'supervisorAlive' means for
+ * the legacy pidfile check: "a crash will be caught and restarted." */
+function isNativeServiceRegistered(manager: 'launchd' | 'systemd'): boolean {
+  try {
+    if (manager === 'launchd') {
+      execSync(`launchctl print gui/${process.getuid?.() ?? 0}/com.termcast.daemon`, { stdio: 'ignore' });
+    } else {
+      execSync('systemctl --user cat termcast.service', { stdio: 'ignore' });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const mesh = program
   .command('mesh')
   .description('Manage port forwards to meshed peer servers');
@@ -1631,11 +1659,15 @@ program
       } catch {}
       return null;
     })();
+    const serviceManager = readServiceManager();
+    const supervisorAlive = serviceManager === 'loop'
+      ? supervisorPid !== null
+      : isNativeServiceRegistered(serviceManager);
     const wrapperPath = join(homedir(), '.termcast', 'bin', 'termcast');
     const running = readRunningState();
 
     const plan = decideRestart({
-      supervisorAlive: supervisorPid !== null,
+      supervisorAlive,
       wrapperExists: existsSync(wrapperPath),
       foregroundAlive: running !== null,
     });
