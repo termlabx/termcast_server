@@ -35,9 +35,11 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, chmodSync, realpathSync, renameSync, statSync, truncateSync } from 'node:fs';
 import { forwardsFromDisk, forwardsFromInvite, mergeMeshForwards, applyForwardChange, isValidPort, type ForwardChange } from './mesh-forwards.js';
 import { loadOrCreateConfigKey, encryptField, decryptField, isEncrypted } from './config-crypto.js';
+import { parseRunningState, isPidAlive, type RunningState } from './single-instance.js';
+import { needsRotation, backupTail } from './log-rotation.js';
 import { type Multiplexer, MULTIPLEXERS, parseMultiplexer, activeMultiplexer, killCommandsForPhone, describeMultiplexerStatus } from './multiplexer.js';
 import { listTerminalTargets } from './terminal-targets.js';
 import { sweepExpiredClusters, upsertCluster, isMeshActive, isMeshEjected, MESH_EJECTED, type ClusterMap } from './membership.js';
@@ -210,6 +212,29 @@ program
   .option('-w, --web-port <port>', 'Web UI port', '8080')
   .option('-s, --shell <shell>', 'Shell to use')
   .action(async (opts) => {
+    // Refuse a second instance against this ~/.ttyd-server identity before any
+    // side effect runs (spawning ttyd, connecting to the relay). See
+    // single-instance.ts for why: two live daemons fight over the relay room
+    // and evict every connected phone on every reconnect.
+    const stateDir = join(homedir(), '.ttyd-server');
+    mkdirSync(stateDir, { recursive: true });
+    const stateFile = join(stateDir, 'state.json');
+    const running = readRunningState();
+    if (running) {
+      console.error(`\x1b[31mTermcast is already running\x1b[0m (pid ${running.pid}).`);
+      let procName: string | null = null;
+      try {
+        procName = execSync(`ps -p ${running.pid} -o comm=`, { encoding: 'utf-8' }).trim() || null;
+      } catch {}
+      if (procName) console.error(`  → ${procName}`);
+      console.error('Stop it first (termcast stop, or quit Termcast from the menu bar if that\'s the app), then retry.');
+      process.exit(1);
+    }
+    // Claim the identity immediately, before the slower steps below (ttyd,
+    // relay, QR) — a second `start` racing us right now must see a live pid
+    // rather than land in the same gap this check just closed.
+    writeFileSync(stateFile, JSON.stringify({ pid: process.pid }));
+
     // Resolve the relay before anything else: there is no default, and failing
     // here must not leave a spawned termcastd behind.
     const resolvedRelay = resolveRelayUrl(opts.relay);
@@ -673,7 +698,10 @@ program
         ? new OpencodeAdapter(
             new OpencodeClient(url, defaultOpencodeDbPath()),
             new OpencodeEventStream({ baseUrl: url }),
-            { desk: deskRegistry, liveness },
+            // No liveness oracle: opencode's send no longer branches on it (an
+            // unreachable session is posted to, not refused), and the registry
+            // keeps its own for the listing.
+            { desk: deskRegistry },
           )
         : null;
       // Desk sends have no transcript flag to end their turn, so the adapter
@@ -800,10 +828,8 @@ program
     await registerGrant(currentPairing);
     await displayQRCode(currentPairing);
 
-    // Save state so `ttyd-server qr` can regenerate QR codes
-    const stateDir = join(homedir(), '.ttyd-server');
-    mkdirSync(stateDir, { recursive: true });
-    const stateFile = join(stateDir, 'state.json');
+    // Save state so `ttyd-server qr` can regenerate QR codes (stateDir/stateFile
+    // were already created above, by the single-instance guard).
     const saveState = () => {
       writeFileSync(stateFile, JSON.stringify({
         relayURL,
@@ -893,6 +919,28 @@ program
     }, 60_000);
     clusterSweepTimer.unref();
 
+    // Rotate our own log file so it can't grow without bound. Whatever
+    // supervises us (launchd, systemd, or the fallback loop) opens
+    // termcast.log in append mode and hands us that fd as stdout/stderr —
+    // truncating the file by path (not through that fd) keeps it valid for
+    // the next write, so this doesn't need coordination with the supervisor.
+    // Caps total on-disk footprint at ~5MB: 2.5MB active + 2.5MB backup.
+    const LOG_FILE = join(homedir(), '.termcast', 'termcast.log');
+    const MAX_LOG_BYTES = 2_621_440;
+    const rotateLogInterval = setInterval(() => {
+      try {
+        const size = statSync(LOG_FILE).size;
+        if (!needsRotation(size, MAX_LOG_BYTES)) return;
+        const content = readFileSync(LOG_FILE);
+        writeFileSync(`${LOG_FILE}.1`, backupTail(content, MAX_LOG_BYTES));
+        truncateSync(LOG_FILE, 0);
+      } catch {
+        // No log file yet (e.g. running interactively with stdout on a tty) —
+        // nothing to rotate.
+      }
+    }, parseInt(process.env.TERMCAST_ROTATE_INTERVAL_MS ?? '30000', 10));
+    rotateLogInterval.unref();
+
     await webUI.start(parseInt(opts.webPort));
     // Re-persist now that we know the actual bound web port (it may have shifted
     // if the requested port was busy) so `termcast status` can reach /api/status.
@@ -907,6 +955,7 @@ program
       relay.disconnect();
       webUI.stop();
       clearInterval(clusterSweepTimer);
+      clearInterval(rotateLogInterval);
       for (const mc of meshClients.values()) mc.stop();
       meshClients.clear();
       try { unlinkSync(stateFile); } catch {}
@@ -1166,21 +1215,18 @@ program
   });
 
 /** Read state.json and confirm the recorded server process is alive. */
-function readRunningState(): { pid: number; webPort?: number } | null {
+function readRunningState(): RunningState | null {
   const stateFile = join(homedir(), '.ttyd-server', 'state.json');
   if (!existsSync(stateFile)) return null;
+  let raw: string;
   try {
-    const state = JSON.parse(readFileSync(stateFile, 'utf-8')) as { pid?: number; webPort?: number };
-    if (!state.pid) return null;
-    try {
-      process.kill(state.pid, 0);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EPERM') return null;
-    }
-    return { pid: state.pid, webPort: state.webPort };
+    raw = readFileSync(stateFile, 'utf-8');
   } catch {
     return null;
   }
+  const state = parseRunningState(raw);
+  if (!state) return null;
+  return isPidAlive(state.pid, process.kill.bind(process)) ? state : null;
 }
 
 const mesh = program
