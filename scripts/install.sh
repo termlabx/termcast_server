@@ -58,6 +58,25 @@ detect_platform() {
   fi
 }
 
+# ── Detect service manager ────────────────────────────────────────
+# macOS always has launchd. Linux requires systemd as PID 1 AND a reachable
+# --user manager — not just the systemctl binary, which can be present in a
+# container with no running user session/D-Bus, and must not be misdetected
+# as supported. Falls back to the bash loop otherwise.
+detect_service_manager() {
+  if [ "$PLATFORM" = "darwin" ]; then
+    SERVICE_MANAGER="launchd"
+    return
+  fi
+  if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null && \
+     systemctl --user daemon-reload &>/dev/null; then
+    SERVICE_MANAGER="systemd"
+  else
+    SERVICE_MANAGER="loop"
+    warn "No usable systemd user session detected — falling back to the built-in supervisor."
+  fi
+}
+
 # ── Check / install Node.js ──────────────────────────────────────
 ensure_node() {
   # Must track the `engines.node` floor in relay-server/package.json. A system
@@ -259,35 +278,174 @@ SCRIPT="$HOME/.termcast/dist/index.js"
 LOG="$HOME/.termcast/termcast.log"
 PID_FILE="$HOME/.termcast/termcast.pid"
 LOOP="$HOME/.termcast/bin/termcast-loop"
+SERVICE_MANAGER="SERVICE_MANAGER_PLACEHOLDER"   # launchd | systemd | loop
+PLIST="$HOME/Library/LaunchAgents/com.termcast.daemon.plist"
+UNIT="$HOME/.config/systemd/user/termcast.service"
+
+# Regenerate the launchd job with the current start args baked in.
+# `launchctl kickstart` replays whatever definition is currently loaded, not
+# the live command line, so this must run before every (re)start.
+write_launchd_plist() {
+  local args_xml=""
+  local arg esc
+  for arg in "$@"; do
+    esc="${arg//&/&amp;}"
+    esc="${esc//</&lt;}"
+    esc="${esc//>/&gt;}"
+    args_xml="${args_xml}    <string>${esc}</string>
+"
+  done
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.termcast.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NODE_PATH}</string>
+    <string>${SCRIPT}</string>
+    <string>start</string>
+${args_xml}  </array>
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>${LOG}</string>
+  <key>StandardErrorPath</key><string>${LOG}</string>
+  <key>WorkingDirectory</key><string>${HOME}/.termcast</string>
+</dict>
+</plist>
+PLIST_EOF
+}
+
+# Same idea for the systemd unit: rewritten with current args before every
+# (re)start, then `daemon-reload` so systemd actually picks up the change.
+write_systemd_unit() {
+  local exec_args=""
+  local arg
+  for arg in "$@"; do
+    exec_args="${exec_args} $(printf '%q' "$arg")"
+  done
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$UNIT" <<UNIT_EOF
+[Unit]
+Description=Termcast daemon
+
+[Service]
+Type=simple
+ExecStart=$(printf '%q' "$NODE_PATH") $(printf '%q' "$SCRIPT") start${exec_args}
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:$(printf '%q' "$LOG")
+StandardError=append:$(printf '%q' "$LOG")
+WorkingDirectory=$(printf '%q' "$HOME/.termcast")
+UNIT_EOF
+}
+
+# A legacy termcast-loop supervisor from a prior install, still running —
+# must be stopped before native supervision takes over the same identity
+# (~/.ttyd-server), or both would fight over the relay room.
+legacy_loop_alive() {
+  [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
 
 case "${1:-}" in
   start)
     shift
-    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-      echo "Termcast is already running. Use 'termcast restart' to restart."
-      exit 0
+    if legacy_loop_alive; then
+      echo "Stopping legacy supervisor before switching to native service management..."
+      "$0" stop
+      sleep 1
     fi
-    nohup "$LOOP" "$@" > /dev/null 2>&1 &
-    disown
-    echo "Termcast started — logs: $LOG"
-    sleep 2
-    grep -m1 'Web UI\|QR\|Connected\|relay' "$LOG" 2>/dev/null || true
+    case "$SERVICE_MANAGER" in
+      launchd)
+        write_launchd_plist "$@"
+        launchctl bootout "gui/$(id -u)/com.termcast.daemon" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$PLIST"
+        launchctl kickstart -k "gui/$(id -u)/com.termcast.daemon"
+        echo "Termcast started — logs: $LOG"
+        sleep 2
+        grep -m1 'Web UI\|QR\|Connected\|relay' "$LOG" 2>/dev/null || true
+        ;;
+      systemd)
+        if systemctl --user daemon-reload 2>/dev/null; then
+          write_systemd_unit "$@"
+          systemctl --user daemon-reload
+          loginctl enable-linger "$(whoami)" 2>/dev/null || \
+            echo "Note: could not enable linger — Termcast may stop when this session ends. An admin can run: loginctl enable-linger $(whoami)"
+          systemctl --user restart termcast
+          echo "Termcast started — logs: $LOG"
+          sleep 2
+          grep -m1 'Web UI\|QR\|Connected\|relay' "$LOG" 2>/dev/null || true
+        else
+          echo "systemd user session unavailable — falling back to the built-in supervisor."
+          SERVICE_MANAGER=loop
+        fi
+        ;;
+    esac
+    if [ "$SERVICE_MANAGER" = "loop" ]; then
+      if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "Termcast is already running. Use 'termcast restart' to restart."
+        exit 0
+      fi
+      nohup "$LOOP" "$@" > /dev/null 2>&1 &
+      disown
+      echo "Termcast started — logs: $LOG"
+      sleep 2
+      grep -m1 'Web UI\|QR\|Connected\|relay' "$LOG" 2>/dev/null || true
+    fi
     ;;
   stop)
-    if [ -f "$PID_FILE" ]; then
-      PID=$(cat "$PID_FILE")
-      kill "$PID" 2>/dev/null && echo "Termcast stopped" || echo "Server not running"
+    case "$SERVICE_MANAGER" in
+      launchd)
+        launchctl kill SIGTERM "gui/$(id -u)/com.termcast.daemon" 2>/dev/null && echo "Termcast stopped" || echo "Server not running"
+        ;;
+      systemd)
+        systemctl --user stop termcast 2>/dev/null && echo "Termcast stopped" || echo "Server not running"
+        ;;
+      *)
+        if [ -f "$PID_FILE" ]; then
+          PID=$(cat "$PID_FILE")
+          kill "$PID" 2>/dev/null && echo "Termcast stopped" || echo "Server not running"
+          rm -f "$PID_FILE"
+        else
+          echo "No running server found"
+        fi
+        ;;
+    esac
+    # Belt & suspenders: stop a legacy loop too, in case one is still around.
+    if legacy_loop_alive; then
+      kill "$(cat "$PID_FILE")" 2>/dev/null || true
       rm -f "$PID_FILE"
-    else
-      echo "No running server found"
     fi
     pkill -x termcastd 2>/dev/null || true; pkill -x ttyd 2>/dev/null || true
     ;;
   restart)
     shift
-    "$0" stop
-    sleep 1
-    "$0" start "$@"
+    case "$SERVICE_MANAGER" in
+      launchd)
+        write_launchd_plist "$@"
+        launchctl bootout "gui/$(id -u)/com.termcast.daemon" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$PLIST"
+        launchctl kickstart -k "gui/$(id -u)/com.termcast.daemon"
+        echo "Termcast restarted — logs: $LOG"
+        ;;
+      systemd)
+        write_systemd_unit "$@"
+        systemctl --user daemon-reload
+        systemctl --user restart termcast
+        echo "Termcast restarted — logs: $LOG"
+        ;;
+      *)
+        "$0" stop
+        sleep 1
+        "$0" start "$@"
+        ;;
+    esac
     ;;
   logs)
     tail -f "$LOG"
@@ -310,8 +468,14 @@ esac
 WRAPPER
 
   sed -i.bak "s|NODE_PATH_PLACEHOLDER|$NODE_PATH|" "$INSTALL_DIR/bin/termcast"
+  sed -i.bak "s|SERVICE_MANAGER_PLACEHOLDER|$SERVICE_MANAGER|" "$INSTALL_DIR/bin/termcast"
   rm -f "$INSTALL_DIR/bin/termcast.bak"
   chmod +x "$INSTALL_DIR/bin/termcast"
+
+  # Mirrors the wrapper's baked-in choice to a plain file so the Node CLI
+  # (which can't easily parse the wrapper script) can read it too — see
+  # `termcast upgrade`'s supervisor-liveness check.
+  echo "$SERVICE_MANAGER" > "$INSTALL_DIR/service-manager"
 }
 
 # ── Add to PATH ──────────────────────────────────────────────────
@@ -365,12 +529,14 @@ main() {
   echo ""
 
   detect_platform
+  detect_service_manager
 
   local PLATFORM_LABEL="$PLATFORM-$NODE_ARCH"
   if [ "$IS_WSL" = true ]; then
     PLATFORM_LABEL="$PLATFORM_LABEL (WSL)"
   fi
   info "Platform: $PLATFORM_LABEL"
+  info "Service manager: $SERVICE_MANAGER"
   echo ""
 
   BUNDLED_NODE=false
