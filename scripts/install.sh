@@ -215,60 +215,23 @@ SUPERVISOR_PID=$$
 echo "$SUPERVISOR_PID" > "$PID_FILE"
 
 CHILD=
-ROTATOR=
 cleanup() {
   kill "$CHILD" 2>/dev/null || true
-  kill "$ROTATOR" 2>/dev/null || true
   rm -f "$PID_FILE"
   exit 0
 }
 trap cleanup TERM INT
 
-# ── Log rotation ─────────────────────────────────────────────────
-# Cap total log disk usage at ~5MB: the active log is rotated once it grows
-# past MAX_LOG (2.5MB), and at most MAX_LOG bytes of history are kept in the
-# single backup termcast.log.1 — so termcast.log + termcast.log.1 ≈ 5MB.
-#
-# The backup is taken with `tail -c` (not `cp`) so a burst of output between
-# rotation checks can't blow past the budget: however large the active log
-# grew, only its last MAX_LOG bytes are retained. The server holds the log
-# open in append mode (>>), so truncating in place keeps its fd valid
-# (copytruncate style).
-#
-# The rotator polls the supervisor's liveness each cycle and exits when it
-# is gone. Without this, a supervisor that dies WITHOUT running its trap
-# (SIGKILL, OOM-kill, panic/reboot) orphans this subshell — it reparents to
-# init and runs forever. Since it shares the supervisor's $0, those orphans
-# pile up in `ps` as extra `termcast-loop` processes across crash cycles.
-MAX_LOG=2621440   # 2.5MB per file → ~5MB total with one backup
-ROTATE_INTERVAL="${TERMCAST_ROTATE_INTERVAL:-30}"
-rotate_logs() {
-  while kill -0 "$SUPERVISOR_PID" 2>/dev/null; do
-    if [ -f "$LOG" ]; then
-      size=$(wc -c < "$LOG" 2>/dev/null || echo 0)
-      if [ "$size" -gt "$MAX_LOG" ]; then
-        tail -c "$MAX_LOG" "$LOG" > "$LOG.1" 2>/dev/null || true
-        : > "$LOG"
-      fi
-    fi
-    sleep "$ROTATE_INTERVAL"
-  done
-  # Supervisor gone — don't linger as an orphaned process.
-  exit 0
-}
-rotate_logs &
-ROTATOR=$!
-
-BASE_DELAY=120     # normal restart delay after a crash (seconds)
-MAX_DELAY=900      # cap exponential backoff at 15 min
-HEALTHY_RUN=300    # a run lasting this long is considered healthy
-backoff=$BASE_DELAY
+# Fixed restart delay, matching the ThrottleInterval/RestartSec the native
+# launchd/systemd supervisors use — this loop is now only a fallback for
+# environments with neither. Log rotation and 429 backoff both moved out of
+# this script: rotation runs in-process in the daemon itself now (it can no
+# longer orphan a subshell if this supervisor dies uncleanly), and the
+# relay's own reconnect backoff (relay-client.ts, capped at 2h) already
+# handles rate limiting without needing a whole-process restart.
+RESTART_DELAY="${TERMCAST_RESTART_DELAY:-10}"
 
 while true; do
-  # Remember where this run's log output starts so we can scan only its lines
-  start_line=$(wc -l < "$LOG" 2>/dev/null || echo 0)
-  run_start=$(date +%s)
-
   "$NODE_PATH" "$SCRIPT" start "$@" >> "$LOG" 2>&1 &
   CHILD=$!
   wait "$CHILD"
@@ -278,26 +241,9 @@ while true; do
     cleanup
   fi
   pkill -x termcastd 2>/dev/null || true; pkill -x ttyd 2>/dev/null || true
-
-  # A run that stayed up a while was healthy — reset the backoff.
-  run_secs=$(( $(date +%s) - run_start ))
-  [ "$run_secs" -ge "$HEALTHY_RUN" ] && backoff=$BASE_DELAY
-
-  # If this run got Cloudflare rate-limited (429), back off exponentially so
-  # the loop doesn't hammer the relay. Otherwise restart at the base delay.
-  if tail -n +"$((start_line + 1))" "$LOG" 2>/dev/null | grep -q '429'; then
-    delay=$backoff
-    backoff=$(( backoff * 2 ))
-    [ "$backoff" -gt "$MAX_DELAY" ] && backoff=$MAX_DELAY
-    printf '[%s] Crashed (exit %d) after relay 429 rate limit — backing off %ds...\n' \
-      "$(date '+%Y-%m-%d %H:%M:%S')" "$code" "$delay" >> "$LOG"
-  else
-    backoff=$BASE_DELAY
-    delay=$BASE_DELAY
-    printf '[%s] Crashed (exit %d), restarting in %ds...\n' \
-      "$(date '+%Y-%m-%d %H:%M:%S')" "$code" "$delay" >> "$LOG"
-  fi
-  sleep "$delay"
+  printf '[%s] Crashed (exit %d), restarting in %ds...\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$code" "$RESTART_DELAY" >> "$LOG"
+  sleep "$RESTART_DELAY"
 done
 LOOP
 

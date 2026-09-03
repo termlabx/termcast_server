@@ -47,8 +47,7 @@ fi
 PID_FILE="$HOME/.termcast/termcast.pid"
 
 # Launch the supervisor detached, reparented to init (like `nohup … &`).
-# TERMCAST_ROTATE_INTERVAL keeps the rotator responsive so the test is fast.
-TERMCAST_ROTATE_INTERVAL=1 setsid nohup "$HOME/.termcast/bin/termcast-loop" \
+setsid nohup "$HOME/.termcast/bin/termcast-loop" \
   > /dev/null 2>&1 &
 sleep 2
 
@@ -57,7 +56,7 @@ before=$(pgrep -fc 'bin/termcast-loop'); before=${before:-0}
 echo "running loop procs before kill: $before"
 
 # Simulate a hard death of the supervisor with NO chance to run its trap:
-# SIGKILL / OOM-kill / panic. The rotate_logs subshell must not survive.
+# SIGKILL / OOM-kill / panic. Nothing it spawned should survive it either.
 sup=$(cat "$PID_FILE" 2>/dev/null || echo "")
 [ -n "$sup" ] || fail "no PID file written"
 echo "hard-killing supervisor $sup (SIGKILL, trap bypassed)"
@@ -73,7 +72,7 @@ fi
 echo "ok: hard-kill (SIGKILL) leaves no orphan"
 
 # ── Scenario 2: clean stop (SIGTERM) still reaps everything via the trap ──
-TERMCAST_ROTATE_INTERVAL=1 setsid nohup "$HOME/.termcast/bin/termcast-loop" \
+setsid nohup "$HOME/.termcast/bin/termcast-loop" \
   > /dev/null 2>&1 &
 sleep 2
 sup=$(cat "$PID_FILE" 2>/dev/null || echo "")
