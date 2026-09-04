@@ -1587,6 +1587,40 @@ async function upgradeShellServer(base: string): Promise<void> {
   }
 }
 
+/**
+ * Regenerate `bin/termcast` + `bin/termcast-loop` (and the service-manager
+ * marker) from the latest `install.sh`, without re-downloading Node, server
+ * code, or native binaries — `TERMCAST_WRAPPER_ONLY=1` short-circuits the
+ * installer to just that step (see scripts/install.sh).
+ *
+ * The release tarball ships dist/ + package.json only, never scripts/, so an
+ * already-installed machine has no local copy of install.sh to run — this is
+ * what lets `termcast upgrade` (unlike a first install) pick up native
+ * launchd/systemd supervision on a machine that predates it, or any future
+ * wrapper fix, without the user re-running the curl | bash installer by hand.
+ * Best-effort: the caller treats a failure here as a warning, not fatal —
+ * the dist/package.json refresh above is the part that actually matters.
+ */
+async function regenerateShellWrapper(base: string): Promise<void> {
+  const resp = await fetch(`${base}/install.sh`, { redirect: 'follow' });
+  if (!resp.ok) throw new Error(`install.sh download failed: HTTP ${resp.status}`);
+  const script = await resp.text();
+  if (!script.includes('TERMCAST_WRAPPER_ONLY')) {
+    throw new Error('install.sh download looks stale (no TERMCAST_WRAPPER_ONLY support)');
+  }
+
+  const tmp = join(homedir(), '.termcast', `.upgrade-install-${Date.now()}.sh`);
+  writeFileSync(tmp, script, { mode: 0o700 });
+  try {
+    execSync(`bash '${tmp}'`, {
+      stdio: 'ignore',
+      env: { ...process.env, TERMCAST_WRAPPER_ONLY: '1' },
+    });
+  } finally {
+    try { unlinkSync(tmp); } catch {}
+  }
+}
+
 /** Prompt for a yes/no answer (default no). Resolves true only on y/yes. */
 async function promptYesNo(question: string): Promise<boolean> {
   const { createInterface } = await import('node:readline');
@@ -1634,6 +1668,11 @@ program
           console.error(`\x1b[31m${(err as Error).message}\x1b[0m`);
           console.error('  Re-run the installer: curl -fsSL ' + base + '/install.sh | bash');
           process.exit(1);
+        }
+        try {
+          await regenerateShellWrapper(base);
+        } catch (err) {
+          console.log(`\x1b[33m  Could not refresh the termcast command (${(err as Error).message}); if you're on an older wrapper, re-run the installer.\x1b[0m`);
         }
       }
     }
