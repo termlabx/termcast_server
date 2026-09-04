@@ -212,12 +212,16 @@ download_tmux() {
 create_wrapper() {
   step "$CURRENT_STEP" "Creating termcast command..."
 
-  # Determine node path for wrapper (runtime $HOME expansion for bundled node)
-  local NODE_PATH
-  if [ "${BUNDLED_NODE:-false}" = true ]; then
-    NODE_PATH="\$HOME/.termcast/node/bin/node"
-  else
-    NODE_PATH="$(command -v node)"
+  # Determine node path for wrapper (runtime $HOME expansion for bundled node).
+  # In TERMCAST_WRAPPER_ONLY mode the caller has already set NODE_PATH from
+  # the existing wrapper — reuse it rather than re-deriving (that mode must
+  # not download or re-detect Node, only regenerate the wrapper).
+  if [ -z "${NODE_PATH:-}" ]; then
+    if [ "${BUNDLED_NODE:-false}" = true ]; then
+      NODE_PATH="\$HOME/.termcast/node/bin/node"
+    else
+      NODE_PATH="$(command -v node)"
+    fi
   fi
 
   # ── Restart loop (separate background process) ───────────────────
@@ -426,6 +430,11 @@ case "${1:-}" in
     ;;
   restart)
     shift
+    if legacy_loop_alive; then
+      echo "Stopping legacy supervisor before switching to native service management..."
+      "$0" stop
+      sleep 1
+    fi
     case "$SERVICE_MANAGER" in
       launchd)
         write_launchd_plist "$@"
@@ -538,6 +547,25 @@ main() {
   info "Platform: $PLATFORM_LABEL"
   info "Service manager: $SERVICE_MANAGER"
   echo ""
+
+  # `termcast upgrade` sets this to regenerate bin/termcast + bin/termcast-loop
+  # (and the service-manager marker) on an already-installed machine, e.g. to
+  # pick up native launchd/systemd supervision on an install that predates it
+  # — without re-downloading Node, server code, or native binaries.
+  if [ "${TERMCAST_WRAPPER_ONLY:-}" = "1" ]; then
+    if [ ! -f "$INSTALL_DIR/bin/termcast" ]; then
+      fail "Termcast is not installed (no existing $INSTALL_DIR/bin/termcast) — run the full installer first."
+    fi
+    NODE_PATH="$(sed -n 's/^NODE_PATH="\(.*\)"$/\1/p' "$INSTALL_DIR/bin/termcast" | head -1)"
+    if [ -z "$NODE_PATH" ]; then
+      fail "Could not determine the existing Node path from $INSTALL_DIR/bin/termcast."
+    fi
+    CURRENT_STEP=1
+    TOTAL_STEPS=1
+    create_wrapper
+    ok "Wrapper regenerated (service manager: $SERVICE_MANAGER)"
+    return
+  fi
 
   BUNDLED_NODE=false
   TOTAL_STEPS=6

@@ -72,6 +72,20 @@ grep -q '<string>-p</string>' "$HOME1/Library/LaunchAgents/com.termcast.daemon.p
 grep -q '<string>9000</string>' "$HOME1/Library/LaunchAgents/com.termcast.daemon.plist" || fail "plist did not bake in the 9000 arg"
 echo "ok: launchd start re-bakes current flags into the plist"
 
+# Regression: `restart` must also stop a live legacy termcast-loop first, not
+# just `start` — otherwise `termcast upgrade` regenerating the wrapper on an
+# already-running pre-migration install and then auto-restarting would leave
+# the old loop running AND start a second, natively-supervised daemon.
+sleep 300 & LEGACY_PID1=$!
+echo "$LEGACY_PID1" > "$HOME1/.termcast/termcast.pid"
+: > "$CALLS1"
+PATH="$HOME1/bin:$PATH" HOME="$HOME1" "$HOME1/.termcast/bin/termcast" restart >/dev/null
+sleep 1
+kill -0 "$LEGACY_PID1" 2>/dev/null && fail "launchd restart left the legacy loop process running"
+[ -f "$HOME1/.termcast/termcast.pid" ] && fail "launchd restart left the legacy loop's PID file behind"
+grep -q '^launchctl kickstart -k gui/.*com.termcast.daemon$' "$CALLS1" || fail "launchd restart did not still kickstart after stopping the legacy loop"
+echo "ok: launchd restart stops a live legacy loop before taking over"
+
 # ── Scenario 2: systemd — start reloads/enables linger/restarts, stop stops ──
 HOME2="$WORK/systemd-home"
 CALLS2="$WORK/systemd-calls"
@@ -92,6 +106,17 @@ echo "ok: systemd start reloads, enables linger, restarts; unit restarts on fail
 PATH="$HOME2/bin:$PATH" HOME="$HOME2" "$HOME2/.termcast/bin/termcast" stop >/dev/null
 grep -q '^systemctl --user stop termcast$' "$CALLS2" || fail "systemd stop did not stop the unit"
 echo "ok: systemd stop calls systemctl --user stop"
+
+# Same regression as the launchd case above, for the systemd path.
+sleep 300 & LEGACY_PID2=$!
+echo "$LEGACY_PID2" > "$HOME2/.termcast/termcast.pid"
+: > "$CALLS2"
+PATH="$HOME2/bin:$PATH" HOME="$HOME2" "$HOME2/.termcast/bin/termcast" restart >/dev/null
+sleep 1
+kill -0 "$LEGACY_PID2" 2>/dev/null && fail "systemd restart left the legacy loop process running"
+[ -f "$HOME2/.termcast/termcast.pid" ] && fail "systemd restart left the legacy loop's PID file behind"
+grep -q '^systemctl --user restart termcast$' "$CALLS2" || fail "systemd restart did not still restart the unit after stopping the legacy loop"
+echo "ok: systemd restart stops a live legacy loop before taking over"
 
 # ── Scenario 3: loop fallback still works when SERVICE_MANAGER=loop ──
 HOME3="$WORK/loop-home"
