@@ -1,6 +1,6 @@
 {
   "name": "@termcast/cli",
-  "version": "0.184.0",
+  "version": "0.185.0",
   "description": "Termcast relay server CLI — access your terminal from anywhere",
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -36,17 +36,17 @@
     "test:all": "tsx --test src/port-forward.test.ts src/mesh-client.test.ts src/bridge.test.ts src/status.test.ts src/connect-select.test.ts src/open-url.test.ts src/mesh-forwards.test.ts src/web-ui.test.ts src/config-crypto.test.ts src/ttyd-index.test.ts src/upgrade.test.ts src/port-forward-integration.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.310",
     "commander": "^13.1.0",
     "qrcode": "^1.5.4",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.19.2",
     "@types/qrcode": "^1.5.5",
-    "@types/ws": "^8.5.14",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   },
   "author": "ulixlab",
   "repository": {
